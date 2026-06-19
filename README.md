@@ -27,6 +27,32 @@ operational question you ask before starting work:
 Agent Quota does not store provider API keys. Probes use local credentials in
 memory and normalize provider-specific responses into a small JSON model.
 
+## Prerequisites
+
+- Rust 1.88 or newer for local builds.
+- Codex CLI installed and signed in for Codex quota checks.
+- Claude Code installed and signed in for Claude Code quota checks.
+
+Missing or unsigned-in providers are reported as unavailable rather than
+blocking the whole status response.
+
+## Install
+
+From GitHub:
+
+```bash
+cargo install --git https://github.com/Halven08/agent-quota agent-quota
+```
+
+From a local checkout:
+
+```bash
+cargo install --path crates/agent-quota-cli
+```
+
+The CLI is currently distributed from GitHub. crates.io publishing will come
+after the core API stabilizes.
+
 ## CLI
 
 ```bash
@@ -75,6 +101,19 @@ let snapshots = collect_usage(CollectUsageOptions::all()).await;
 Early extraction from Janus. The API is intentionally small, but provider probes
 are best-effort and may need updates when CLIs, credential files, or response
 headers change.
+
+## Privacy and provider impact
+
+Agent Quota is local-first and does not store provider credentials. The current
+Claude Code probe reads the local Claude Code OAuth token into memory and sends a
+minimal Anthropic Messages API request with a fixed `"hi"` prompt so it can read
+rate-limit headers from the response. It does not send source code, repository
+contents, terminal history, or arbitrary user prompts.
+
+Because the Claude Code probe calls the Anthropic API, it may touch provider
+quota or billing according to your Anthropic/Claude subscription behavior. The
+Codex probe talks to the local `codex app-server` process and asks it for account
+and rate-limit state.
 
 ## Not official
 

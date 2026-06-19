@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, process::Stdio};
 
 use reqwest::header::HeaderMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
@@ -96,7 +96,7 @@ struct CachedProviderUsage {
     cached_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsageSnapshot {
     pub provider_id: String,
@@ -108,14 +108,14 @@ pub struct ProviderUsageSnapshot {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageStatus {
     Available,
     Unavailable,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsageWindow {
     pub kind: ProviderUsageWindowKind,
@@ -127,7 +127,7 @@ pub struct ProviderUsageWindow {
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderUsageWindowKind {
     FiveHour,
@@ -216,8 +216,8 @@ async fn query_codex_usage() -> UsageResult<ProviderUsageSnapshot> {
             "id": 1,
             "params": {
                 "clientInfo": {
-                    "name": "janus_os",
-                    "title": "Janus OS",
+                    "name": "agent_quota",
+                    "title": "Agent Quota",
                     "version": env!("CARGO_PKG_VERSION"),
                 }
             }

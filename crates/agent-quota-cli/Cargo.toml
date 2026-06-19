@@ -1,12 +1,13 @@
 ﻿[package]
 name = "agent-quota"
-version = "0.1.0"
+version = "0.1.1"
 description = "CLI for checking local AI coding agent quota status"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+publish = false
 
 [[bin]]
 name = "agent-quota"
