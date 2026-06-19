@@ -1,0 +1,21 @@
+﻿[workspace]
+members = [
+  "crates/agent-quota-core",
+  "crates/agent-quota-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/Halven08/agent-quota"
+authors = ["Halven08"]
+
+[workspace.dependencies]
+dirs = "6"
+futures = "0.3"
+reqwest = { version = "0.13", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
