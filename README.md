@@ -2,6 +2,8 @@
 
 One-glance quota status for Codex, Claude Code, and local AI coding agents.
 
+[![CI](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml)
+
 Agent Quota is a local-first Rust library and CLI for checking which AI coding
 subscription still has room before you start another agent run. It is designed
 for two use cases:
