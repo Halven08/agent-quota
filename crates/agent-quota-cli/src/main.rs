@@ -1,23 +1,39 @@
 use std::time::Duration;
+use std::{path::PathBuf, process};
 
-use agent_quota_core::{collect_usage, CollectUsageOptions, ProviderId, ProviderUsageSnapshot};
+use agent_quota_core::{
+    collect_usage, AgentQuotaConfig, CollectUsageOptions, ProviderId, ProviderProfile,
+    ProviderUsageSnapshot,
+};
 use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 struct CliOptions {
+    command: CliCommand,
     json: bool,
     watch: bool,
     interval_seconds: u64,
     providers: Vec<ProviderId>,
+    profiles: Vec<String>,
+    config_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliCommand {
+    Status,
+    ProfilesList,
 }
 
 impl Default for CliOptions {
     fn default() -> Self {
         Self {
+            command: CliCommand::Status,
             json: false,
             watch: false,
             interval_seconds: 300,
             providers: Vec::new(),
+            profiles: Vec::new(),
+            config_path: None,
         }
     }
 }
@@ -29,19 +45,48 @@ async fn main() {
         Err(message) => {
             eprintln!("{message}\n");
             print_usage();
-            std::process::exit(2);
+            process::exit(2);
+        }
+    };
+
+    if options.command == CliCommand::ProfilesList {
+        let profiles = match load_configured_profiles(&options) {
+            Ok(profiles) => profiles,
+            Err(message) => {
+                eprintln!("{message}");
+                process::exit(1);
+            }
+        };
+        if options.json {
+            match serde_json::to_string_pretty(&profiles) {
+                Ok(output) => println!("{output}"),
+                Err(error) => {
+                    eprintln!("failed to serialize profiles: {error}");
+                    process::exit(1);
+                }
+            }
+        } else {
+            print_profiles(&profiles);
+        }
+        return;
+    }
+
+    let collect_options = match collect_options(&options) {
+        Ok(collect_options) => collect_options,
+        Err(message) => {
+            eprintln!("{message}");
+            process::exit(1);
         }
     };
 
     loop {
-        let snapshots =
-            collect_usage(CollectUsageOptions::providers(options.providers.clone())).await;
+        let snapshots = collect_usage(collect_options.clone()).await;
         if options.json {
             match serde_json::to_string_pretty(&snapshots) {
                 Ok(output) => println!("{output}"),
                 Err(error) => {
                     eprintln!("failed to serialize quota status: {error}");
-                    std::process::exit(1);
+                    process::exit(1);
                 }
             }
         } else {
@@ -64,7 +109,7 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         Some("help" | "--help" | "-h")
     ) {
         print_usage();
-        std::process::exit(0);
+        process::exit(0);
     }
 
     if matches!(args.first().map(String::as_str), Some("watch")) {
@@ -72,6 +117,12 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         index = 1;
     } else if matches!(args.first().map(String::as_str), Some("status")) {
         index = 1;
+    } else if matches!(args.first().map(String::as_str), Some("profiles")) {
+        if !matches!(args.get(1).map(String::as_str), Some("list")) {
+            return Err("profiles requires the `list` subcommand".to_owned());
+        }
+        options.command = CliCommand::ProfilesList;
+        index = 2;
     }
 
     while index < args.len() {
@@ -86,6 +137,20 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
                 let provider = ProviderId::from_name(raw)
                     .ok_or_else(|| format!("unknown provider `{raw}`; expected codex or claude"))?;
                 options.providers.push(provider);
+            }
+            "--profile" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--profile requires a profile id".to_owned())?;
+                options.profiles.push(raw.to_owned());
+            }
+            "--config" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--config requires a path".to_owned())?;
+                options.config_path = Some(PathBuf::from(raw));
             }
             "--interval" => {
                 index += 1;
@@ -104,22 +169,84 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
     Ok(options)
 }
 
+fn collect_options(options: &CliOptions) -> Result<CollectUsageOptions, String> {
+    if options.config_path.is_some() || !options.profiles.is_empty() {
+        let profiles = load_configured_profiles(options)?;
+        return Ok(CollectUsageOptions::profiles(profiles));
+    }
+
+    Ok(CollectUsageOptions::providers(options.providers.clone()))
+}
+
+fn load_configured_profiles(options: &CliOptions) -> Result<Vec<ProviderProfile>, String> {
+    let path = options
+        .config_path
+        .as_ref()
+        .ok_or_else(|| "--config is required when using profiles".to_owned())?;
+    let config = AgentQuotaConfig::load(path)
+        .map_err(|error| format!("failed to read config at {}: {error}", path.display()))?;
+    let mut profiles = config.profiles();
+
+    if !options.providers.is_empty() {
+        profiles.retain(|profile| options.providers.contains(&profile.provider));
+    }
+    if !options.profiles.is_empty() {
+        profiles.retain(|profile| options.profiles.contains(&profile.id));
+    }
+    if profiles.is_empty() {
+        return Err("no enabled profiles matched the requested filters".to_owned());
+    }
+
+    Ok(profiles)
+}
+
 fn print_usage() {
     eprintln!("agent-quota status [--json] [--provider codex|claude]");
-    eprintln!("agent-quota watch [--json] [--interval seconds] [--provider codex|claude]");
+    eprintln!(
+        "agent-quota status --config agent-quota.toml [--profile id] [--provider codex|claude]"
+    );
+    eprintln!("agent-quota watch [--json] [--interval seconds] [--config agent-quota.toml]");
+    eprintln!("agent-quota profiles list --config agent-quota.toml [--json]");
+}
+
+fn print_profiles(profiles: &[ProviderProfile]) {
+    println!("Profile              Provider      Source");
+    println!("-------------------  ------------  ----------------------------------------");
+    for profile in profiles {
+        let source = profile
+            .credentials_path
+            .as_ref()
+            .or(profile.command_path.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "default CLI account".to_owned());
+        println!(
+            "{:<19}  {:<12}  {}",
+            profile.display_name(),
+            profile.provider.label(),
+            source
+        );
+    }
 }
 
 fn print_table(snapshots: &[ProviderUsageSnapshot]) {
-    println!("Provider      Plan/status        Usage");
-    println!("------------  -----------------  ----------------------------------------");
+    println!("Provider/profile      Plan/account        Usage");
+    println!("--------------------  ------------------  ----------------------------------------");
     for snapshot in snapshots {
-        let account = snapshot.plan.as_deref().unwrap_or({
-            if snapshot.status == agent_quota_core::ProviderUsageStatus::Available {
-                "Signed in"
-            } else {
-                "Unavailable"
-            }
-        });
+        let profile = snapshot
+            .profile_name
+            .as_deref()
+            .unwrap_or(snapshot.provider_name.as_str());
+        let account = snapshot
+            .account_label
+            .as_deref()
+            .or(snapshot.plan.as_deref())
+            .unwrap_or({
+                if snapshot.status == agent_quota_core::ProviderUsageStatus::Available {
+                    "Signed in"
+                } else {
+                    "Unavailable"
+                }
+            });
         let usage = if snapshot.windows.is_empty() {
             snapshot
                 .message
@@ -143,6 +270,6 @@ fn print_table(snapshots: &[ProviderUsageSnapshot]) {
                 .collect::<Vec<_>>()
                 .join(" / ")
         };
-        println!("{:<12}  {:<17}  {}", snapshot.provider_name, account, usage);
+        println!("{profile:<20}  {account:<18}  {usage}");
     }
 }

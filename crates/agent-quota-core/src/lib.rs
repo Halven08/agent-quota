@@ -5,8 +5,9 @@
 //! in memory only, then normalize provider-specific responses into a small
 //! embeddable model.
 
+use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fs, process::Stdio};
@@ -30,7 +31,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 type UsageResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ProviderId {
     Codex,
     Claude,
@@ -60,9 +62,72 @@ impl ProviderId {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderProfile {
+    pub id: String,
+    pub provider: ProviderId,
+    pub label: Option<String>,
+    pub command_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+impl ProviderProfile {
+    pub fn default_for_provider(provider: ProviderId) -> Self {
+        Self {
+            id: provider.as_str().to_owned(),
+            provider,
+            label: None,
+            command_path: None,
+            credentials_path: None,
+            env: BTreeMap::new(),
+            enabled: true,
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        self.label
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| self.provider.label().to_owned())
+    }
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentQuotaConfig {
+    #[serde(default)]
+    pub profiles: Vec<ProviderProfile>,
+}
+
+impl AgentQuotaConfig {
+    pub fn load(path: impl AsRef<Path>) -> UsageResult<Self> {
+        let raw = fs::read_to_string(path.as_ref())?;
+        Ok(toml::from_str(&raw)?)
+    }
+
+    pub fn profiles(&self) -> Vec<ProviderProfile> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.enabled)
+            .cloned()
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CollectUsageOptions {
     pub providers: Vec<ProviderId>,
+    pub profiles: Vec<ProviderProfile>,
 }
 
 impl CollectUsageOptions {
@@ -73,14 +138,35 @@ impl CollectUsageOptions {
     pub fn providers(providers: impl IntoIterator<Item = ProviderId>) -> Self {
         Self {
             providers: providers.into_iter().collect(),
+            profiles: Vec::new(),
         }
     }
 
-    fn selected_providers(&self) -> Vec<ProviderId> {
-        if self.providers.is_empty() {
-            vec![ProviderId::Codex, ProviderId::Claude]
+    pub fn profiles(profiles: impl IntoIterator<Item = ProviderProfile>) -> Self {
+        Self {
+            providers: Vec::new(),
+            profiles: profiles.into_iter().collect(),
+        }
+    }
+
+    fn selected_profiles(&self) -> Vec<ProviderProfile> {
+        if !self.profiles.is_empty() {
+            self.profiles
+                .iter()
+                .filter(|profile| profile.enabled)
+                .cloned()
+                .collect()
+        } else if self.providers.is_empty() {
+            vec![
+                ProviderProfile::default_for_provider(ProviderId::Codex),
+                ProviderProfile::default_for_provider(ProviderId::Claude),
+            ]
         } else {
-            self.providers.clone()
+            self.providers
+                .iter()
+                .copied()
+                .map(ProviderProfile::default_for_provider)
+                .collect()
         }
     }
 }
@@ -101,6 +187,10 @@ struct CachedProviderUsage {
 pub struct ProviderUsageSnapshot {
     pub provider_id: String,
     pub provider_name: String,
+    pub profile_id: Option<String>,
+    pub profile_name: Option<String>,
+    pub account_label: Option<String>,
+    pub source: Option<String>,
     pub status: ProviderUsageStatus,
     pub plan: Option<String>,
     pub windows: Vec<ProviderUsageWindow>,
@@ -165,8 +255,8 @@ impl ProviderUsageCache {
 }
 
 pub async fn collect_usage(options: CollectUsageOptions) -> Vec<ProviderUsageSnapshot> {
-    let providers = options.selected_providers();
-    let snapshots = providers.into_iter().map(collect_single_provider_usage);
+    let profiles = options.selected_profiles();
+    let snapshots = profiles.into_iter().map(collect_profile_usage);
     futures::future::join_all(snapshots).await
 }
 
@@ -175,22 +265,32 @@ pub async fn collect_provider_usage() -> Vec<ProviderUsageSnapshot> {
 }
 
 pub async fn collect_single_provider_usage(provider: ProviderId) -> ProviderUsageSnapshot {
-    match provider {
-        ProviderId::Codex => codex_usage().await,
-        ProviderId::Claude => claude_usage().await,
+    collect_profile_usage(ProviderProfile::default_for_provider(provider)).await
+}
+
+pub async fn collect_profile_usage(profile: ProviderProfile) -> ProviderUsageSnapshot {
+    match profile.provider {
+        ProviderId::Codex => codex_usage(&profile).await,
+        ProviderId::Claude => claude_usage(&profile).await,
     }
 }
 
-async fn codex_usage() -> ProviderUsageSnapshot {
-    match query_codex_usage().await {
+async fn codex_usage(profile: &ProviderProfile) -> ProviderUsageSnapshot {
+    match query_codex_usage(profile).await {
         Ok(snapshot) => snapshot,
-        Err(error) => unavailable("codex", "Codex", format!("Usage unavailable: {error}")),
+        Err(error) => unavailable_for_profile(profile, format!("Usage unavailable: {error}")),
     }
 }
 
-async fn query_codex_usage() -> UsageResult<ProviderUsageSnapshot> {
-    let mut command = Command::new("codex");
+async fn query_codex_usage(profile: &ProviderProfile) -> UsageResult<ProviderUsageSnapshot> {
+    let mut command = Command::new(
+        profile
+            .command_path
+            .as_deref()
+            .unwrap_or_else(|| Path::new("codex")),
+    );
     command.args(["app-server", "--listen", "stdio://"]);
+    command.envs(&profile.env);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -280,6 +380,7 @@ async fn query_codex_usage() -> UsageResult<ProviderUsageSnapshot> {
     let _ = child.kill().await;
 
     Ok(codex_snapshot_from_responses(
+        profile,
         &account_response,
         &rate_limits_response,
     ))
@@ -292,6 +393,7 @@ async fn write_rpc(stdin: &mut ChildStdin, value: Value) -> std::io::Result<()> 
 }
 
 fn codex_snapshot_from_responses(
+    profile: &ProviderProfile,
     account_response: &Value,
     rate_limits_response: &Value,
 ) -> ProviderUsageSnapshot {
@@ -300,6 +402,15 @@ fn codex_snapshot_from_responses(
         .and_then(|value| value.get("planType"))
         .and_then(Value::as_str)
         .map(format_plan_name);
+    let account_label = account
+        .and_then(|value| {
+            value
+                .get("email")
+                .or_else(|| value.get("username"))
+                .or_else(|| value.get("id"))
+        })
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
     let rate_limits = rate_limits_response.pointer("/result/rateLimits");
     let mut windows = Vec::new();
 
@@ -324,6 +435,10 @@ fn codex_snapshot_from_responses(
     ProviderUsageSnapshot {
         provider_id: "codex".to_owned(),
         provider_name: "Codex".to_owned(),
+        profile_id: Some(profile.id.clone()),
+        profile_name: Some(profile.display_name()),
+        account_label,
+        source: Some("codex_app_server".to_owned()),
         status: ProviderUsageStatus::Available,
         plan,
         windows,
@@ -332,19 +447,15 @@ fn codex_snapshot_from_responses(
     }
 }
 
-async fn claude_usage() -> ProviderUsageSnapshot {
-    match query_claude_usage().await {
+async fn claude_usage(profile: &ProviderProfile) -> ProviderUsageSnapshot {
+    match query_claude_usage(profile).await {
         Ok(snapshot) => snapshot,
-        Err(error) => unavailable(
-            "claude",
-            "Claude Code",
-            format!("Usage unavailable: {error}"),
-        ),
+        Err(error) => unavailable_for_profile(profile, format!("Usage unavailable: {error}")),
     }
 }
 
-async fn query_claude_usage() -> UsageResult<ProviderUsageSnapshot> {
-    let token = read_claude_oauth_token()?;
+async fn query_claude_usage(profile: &ProviderProfile) -> UsageResult<ProviderUsageSnapshot> {
+    let token = read_claude_oauth_token(profile.credentials_path.as_deref())?;
     let client = reqwest::Client::new();
     let request = client
         .post("https://api.anthropic.com/v1/messages")
@@ -360,11 +471,14 @@ async fn query_claude_usage() -> UsageResult<ProviderUsageSnapshot> {
     let response = timeout(CLAUDE_TIMEOUT, request.send())
         .await
         .map_err(|_| std::io::Error::other("timed out waiting for claude usage headers"))??;
-    Ok(claude_snapshot_from_headers(response.headers()))
+    Ok(claude_snapshot_from_headers(profile, response.headers()))
 }
 
-fn read_claude_oauth_token() -> UsageResult<String> {
-    let path = claude_credentials_path()?;
+fn read_claude_oauth_token(credentials_path: Option<&Path>) -> UsageResult<String> {
+    let path = credentials_path
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(claude_credentials_path)?;
     let raw = fs::read_to_string(&path).map_err(|error| {
         std::io::Error::other(format!(
             "Claude Code credentials were not readable at {}: {error}",
@@ -408,7 +522,10 @@ fn find_claude_oauth_token(value: &Value) -> Option<&str> {
         })
 }
 
-fn claude_snapshot_from_headers(headers: &HeaderMap) -> ProviderUsageSnapshot {
+fn claude_snapshot_from_headers(
+    profile: &ProviderProfile,
+    headers: &HeaderMap,
+) -> ProviderUsageSnapshot {
     let mut windows = [
         claude_header_window(
             headers,
@@ -444,6 +561,10 @@ fn claude_snapshot_from_headers(headers: &HeaderMap) -> ProviderUsageSnapshot {
     ProviderUsageSnapshot {
         provider_id: "claude".to_owned(),
         provider_name: "Claude Code".to_owned(),
+        profile_id: Some(profile.id.clone()),
+        profile_name: Some(profile.display_name()),
+        account_label: None,
+        source: Some("anthropic_rate_limit_headers".to_owned()),
         status: if windows.is_empty() {
             ProviderUsageStatus::Unavailable
         } else {
@@ -562,6 +683,10 @@ fn claude_snapshot_from_output(output: &str) -> ProviderUsageSnapshot {
     ProviderUsageSnapshot {
         provider_id: "claude".to_owned(),
         provider_name: "Claude Code".to_owned(),
+        profile_id: None,
+        profile_name: None,
+        account_label: None,
+        source: Some("claude_cli_output".to_owned()),
         status,
         plan: parsed
             .as_ref()
@@ -972,10 +1097,31 @@ fn format_plan_name(value: &str) -> String {
     words.join(" ")
 }
 
+#[cfg(test)]
 fn unavailable(provider_id: &str, provider_name: &str, message: String) -> ProviderUsageSnapshot {
     ProviderUsageSnapshot {
         provider_id: provider_id.to_owned(),
         provider_name: provider_name.to_owned(),
+        profile_id: None,
+        profile_name: None,
+        account_label: None,
+        source: None,
+        status: ProviderUsageStatus::Unavailable,
+        plan: None,
+        windows: Vec::new(),
+        updated_at: now_epoch_ms(),
+        message: Some(message),
+    }
+}
+
+fn unavailable_for_profile(profile: &ProviderProfile, message: String) -> ProviderUsageSnapshot {
+    ProviderUsageSnapshot {
+        provider_id: profile.provider.as_str().to_owned(),
+        provider_name: profile.provider.label().to_owned(),
+        profile_id: Some(profile.id.clone()),
+        profile_name: Some(profile.display_name()),
+        account_label: None,
+        source: None,
         status: ProviderUsageStatus::Unavailable,
         plan: None,
         windows: Vec::new(),
@@ -1008,6 +1154,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_profile_config() {
+        let config = toml::from_str::<AgentQuotaConfig>(
+            r#"
+                [[profiles]]
+                id = "claude-work"
+                provider = "claude"
+                label = "Claude Work"
+                credentials_path = "C:/Users/Maciej/.claude-work/.credentials.json"
+
+                [[profiles]]
+                id = "codex-private"
+                provider = "codex"
+                label = "Codex Private"
+                command_path = "codex"
+
+                [profiles.env]
+                CODEX_HOME = "C:/Users/Maciej/.codex-private"
+            "#,
+        )
+        .expect("profile config should parse");
+
+        assert_eq!(config.profiles.len(), 2);
+        assert_eq!(config.profiles[0].provider, ProviderId::Claude);
+        assert_eq!(
+            config.profiles[0].credentials_path.as_deref(),
+            Some(Path::new("C:/Users/Maciej/.claude-work/.credentials.json"))
+        );
+        assert_eq!(
+            config.profiles[1].env.get("CODEX_HOME").map(String::as_str),
+            Some("C:/Users/Maciej/.codex-private")
+        );
+    }
+
+    #[test]
+    fn collect_options_prefers_enabled_profiles() {
+        let enabled = ProviderProfile {
+            id: "claude-work".to_owned(),
+            provider: ProviderId::Claude,
+            ..ProviderProfile::default_for_provider(ProviderId::Claude)
+        };
+        let disabled = ProviderProfile {
+            id: "codex-disabled".to_owned(),
+            provider: ProviderId::Codex,
+            enabled: false,
+            ..ProviderProfile::default_for_provider(ProviderId::Codex)
+        };
+
+        let options = CollectUsageOptions::profiles([enabled, disabled]);
+        let profiles = options.selected_profiles();
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "claude-work");
+    }
+
+    #[test]
     fn maps_codex_app_server_rate_limits() {
         let account = json!({
             "id": 2,
@@ -1026,9 +1227,18 @@ mod tests {
             }
         });
 
-        let snapshot = codex_snapshot_from_responses(&account, &rate_limits);
+        let profile = ProviderProfile {
+            id: "codex-private".to_owned(),
+            provider: ProviderId::Codex,
+            label: Some("Codex Private".to_owned()),
+            ..ProviderProfile::default_for_provider(ProviderId::Codex)
+        };
+        let snapshot = codex_snapshot_from_responses(&profile, &account, &rate_limits);
 
         assert_eq!(snapshot.provider_id, "codex");
+        assert_eq!(snapshot.profile_id.as_deref(), Some("codex-private"));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("Codex Private"));
+        assert_eq!(snapshot.account_label.as_deref(), Some("user@example.com"));
         assert_eq!(snapshot.plan.as_deref(), Some("Plus"));
         assert_eq!(snapshot.windows.len(), 2);
         assert_eq!(snapshot.windows[0].kind, ProviderUsageWindowKind::FiveHour);
@@ -1051,9 +1261,17 @@ mod tests {
             ("anthropic-ratelimit-unified-status", "active"),
         ]);
 
-        let snapshot = claude_snapshot_from_headers(&headers);
+        let profile = ProviderProfile {
+            id: "claude-work".to_owned(),
+            provider: ProviderId::Claude,
+            label: Some("Claude Work".to_owned()),
+            ..ProviderProfile::default_for_provider(ProviderId::Claude)
+        };
+        let snapshot = claude_snapshot_from_headers(&profile, &headers);
 
         assert_eq!(snapshot.provider_id, "claude");
+        assert_eq!(snapshot.profile_id.as_deref(), Some("claude-work"));
+        assert_eq!(snapshot.profile_name.as_deref(), Some("Claude Work"));
         assert_eq!(snapshot.status, ProviderUsageStatus::Available);
         assert_eq!(
             snapshot.message.as_deref(),

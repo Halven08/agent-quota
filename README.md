@@ -59,7 +59,10 @@ after the core API stabilizes.
 agent-quota status
 agent-quota status --json
 agent-quota status --provider codex
+agent-quota status --config agent-quota.toml
+agent-quota status --config agent-quota.toml --profile claude-work
 agent-quota watch --interval 60
+agent-quota profiles list --config agent-quota.toml
 ```
 
 Example JSON shape:
@@ -69,6 +72,10 @@ Example JSON shape:
   {
     "providerId": "codex",
     "providerName": "Codex",
+    "profileId": "codex",
+    "profileName": "Codex",
+    "accountLabel": "you@example.com",
+    "source": "codex_app_server",
     "status": "available",
     "plan": "Plus",
     "windows": [
@@ -88,12 +95,51 @@ Example JSON shape:
 ]
 ```
 
+## Multi-account profiles
+
+Agent Quota can check multiple local accounts through profiles. Profiles are
+labels plus paths/env overrides; they do not contain API keys or OAuth tokens.
+
+```toml
+[[profiles]]
+id = "claude-private"
+provider = "claude"
+label = "Claude Private"
+credentials_path = "C:/Users/you/.claude-private/.credentials.json"
+
+[[profiles]]
+id = "claude-work"
+provider = "claude"
+label = "Claude Work"
+credentials_path = "C:/Users/you/.claude-work/.credentials.json"
+
+[[profiles]]
+id = "codex-private"
+provider = "codex"
+label = "Codex Private"
+
+[profiles.env]
+CODEX_HOME = "C:/Users/you/.codex-private"
+```
+
+See [`agent-quota.example.toml`](agent-quota.example.toml) for a starter file.
+Codex multi-account support depends on the installed Codex CLI honoring the
+environment/config override you provide. Claude profiles can point directly at
+different Claude Code credential files.
+
 ## Library
 
 ```rust
-use agent_quota_core::{collect_usage, CollectUsageOptions};
+use agent_quota_core::{
+    collect_usage, AgentQuotaConfig, CollectUsageOptions,
+};
 
 let snapshots = collect_usage(CollectUsageOptions::all()).await;
+
+let config = AgentQuotaConfig::load("agent-quota.toml")?;
+let snapshots = collect_usage(
+    CollectUsageOptions::profiles(config.profiles())
+).await;
 ```
 
 ## Status

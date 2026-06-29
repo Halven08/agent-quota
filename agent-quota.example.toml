@@ -1,0 +1,19 @@
+[[profiles]]
+id = "claude-private"
+provider = "claude"
+label = "Claude Private"
+credentials_path = "C:/Users/you/.claude-private/.credentials.json"
+
+[[profiles]]
+id = "claude-work"
+provider = "claude"
+label = "Claude Work"
+credentials_path = "C:/Users/you/.claude-work/.credentials.json"
+
+[[profiles]]
+id = "codex-private"
+provider = "codex"
+label = "Codex Private"
+
+[profiles.env]
+CODEX_HOME = "C:/Users/you/.codex-private"
