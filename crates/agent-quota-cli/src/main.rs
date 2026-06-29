@@ -273,3 +273,51 @@ fn print_table(snapshots: &[ProviderUsageSnapshot]) {
         println!("{profile:<20}  {account:<18}  {usage}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_status_with_config_profile_and_provider() {
+        let options = parse_args(vec![
+            "status".to_owned(),
+            "--config".to_owned(),
+            "agent-quota.toml".to_owned(),
+            "--profile".to_owned(),
+            "claude-work".to_owned(),
+            "--provider".to_owned(),
+            "claude".to_owned(),
+            "--json".to_owned(),
+        ])
+        .expect("status args should parse");
+
+        assert_eq!(options.command, CliCommand::Status);
+        assert!(options.json);
+        assert_eq!(options.config_path, Some(PathBuf::from("agent-quota.toml")));
+        assert_eq!(options.profiles, vec!["claude-work"]);
+        assert_eq!(options.providers, vec![ProviderId::Claude]);
+    }
+
+    #[test]
+    fn parses_profiles_list() {
+        let options = parse_args(vec![
+            "profiles".to_owned(),
+            "list".to_owned(),
+            "--config".to_owned(),
+            "agent-quota.toml".to_owned(),
+        ])
+        .expect("profiles list args should parse");
+
+        assert_eq!(options.command, CliCommand::ProfilesList);
+        assert_eq!(options.config_path, Some(PathBuf::from("agent-quota.toml")));
+    }
+
+    #[test]
+    fn rejects_profile_filter_without_value() {
+        let error = parse_args(vec!["status".to_owned(), "--profile".to_owned()])
+            .expect_err("missing profile id should fail");
+
+        assert_eq!(error, "--profile requires a profile id");
+    }
+}
