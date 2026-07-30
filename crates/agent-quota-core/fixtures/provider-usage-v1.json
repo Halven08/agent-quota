@@ -1,0 +1,48 @@
+[
+  {
+    "schemaVersion": 1,
+    "providerId": "codex",
+    "providerName": "Codex",
+    "profileId": "codex",
+    "profileName": "Codex",
+    "accountLabel": "user@example.com",
+    "source": "codex_app_server",
+    "probeStatus": "ok",
+    "quotaState": "available",
+    "plan": "Plus",
+    "windows": [
+      {
+        "kind": "five_hour",
+        "label": "5h window",
+        "usedPercent": 42.0,
+        "remainingPercent": 58.0,
+        "windowMinutes": 300,
+        "resetsAtEpochSeconds": 1730947200,
+        "detail": null
+      }
+    ],
+    "observedAtMs": 1730000000000,
+    "message": null,
+    "error": null
+  },
+  {
+    "schemaVersion": 1,
+    "providerId": "claude",
+    "providerName": "Claude Code",
+    "profileId": "claude",
+    "profileName": "Claude Code",
+    "accountLabel": null,
+    "source": null,
+    "probeStatus": "authentication_required",
+    "quotaState": "unknown",
+    "plan": null,
+    "windows": [],
+    "observedAtMs": 1730000000000,
+    "message": null,
+    "error": {
+      "code": "credentials_unavailable",
+      "message": "Claude Code credentials were not found.",
+      "retryable": false
+    }
+  }
+]

@@ -1,0 +1,45 @@
+name: Bug report
+description: Report incorrect quota behavior or a provider compatibility problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never attach credential files or authorization headers. Redact account identifiers.
+  - type: input
+    id: version
+    attributes:
+      label: Agent Quota version
+      placeholder: v0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - Codex
+        - Claude Code
+        - Multiple or not provider-specific
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and provider CLI version
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include the command, expected behavior, actual behavior, and redacted error output.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+    validations:
+      required: true

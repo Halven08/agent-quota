@@ -1,3 +1,6 @@
+# Profiles contain labels and local paths only. Never place OAuth tokens or API
+# keys in this file.
+
 [[profiles]]
 id = "claude-private"
 provider = "claude"
@@ -14,6 +17,8 @@ credentials_path = "C:/Users/you/.claude-work/.credentials.json"
 id = "codex-private"
 provider = "codex"
 label = "Codex Private"
+enabled = true
 
+# Codex receives these overrides when Agent Quota starts its app-server.
 [profiles.env]
 CODEX_HOME = "C:/Users/you/.codex-private"

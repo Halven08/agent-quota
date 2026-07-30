@@ -10,6 +10,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/Halven08/agent-quota"
+homepage = "https://github.com/Halven08/agent-quota"
 authors = ["Halven08"]
 
 [workspace.dependencies]
@@ -20,3 +21,4 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
+time = { version = "0.3", features = ["formatting", "local-offset"] }

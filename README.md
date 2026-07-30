@@ -1,49 +1,47 @@
-﻿# Agent Quota
+# Agent Quota
 
-One-glance quota status for Codex, Claude Code, and local AI coding agents.
+One-glance quota status for Codex, Claude Code, and tools that embed them.
 
 [![CI](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml)
+[![Security audit](https://github.com/Halven08/agent-quota/actions/workflows/security.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/security.yml)
 
-Agent Quota is a local-first Rust library and CLI for checking which AI coding
-subscription still has room before you start another agent run. It is designed
-for two use cases:
+Agent Quota is a Rust library and CLI that answers two separate questions:
 
-- standalone CLI or desktop app for developers who use multiple AI coding tools;
-- embeddable quota component for tools like Janus, Tauri apps, Electron apps,
-  status bars, and internal developer dashboards.
+1. Could quota information be collected reliably?
+2. Does the reported quota have room for another agent run?
 
-## Why this exists
+Keeping those answers separate makes Agent Quota suitable for terminal use and
+for embedding in desktop applications such as Janus, Tauri or Electron apps,
+status bars, and internal developer dashboards.
 
-Usage analytics tools can tell you what you spent. Agent Quota focuses on the
-operational question you ask before starting work:
+> [!IMPORTANT]
+> Agent Quota is an independent project, not an official OpenAI, Anthropic,
+> Codex, or Claude Code product. Provider interfaces can change.
 
-> Which coding agent can I still use right now, and when does it reset?
+## Provider support
 
-## Current provider probes
+| Provider | Local source | Provider contact | Typical impact |
+| --- | --- | --- | --- |
+| Codex | Signed-in Codex CLI | Local `codex app-server` process | Reads account and rate limits; does not submit a prompt |
+| Claude Code | Local OAuth credential file | Anthropic Messages API | Sends a fixed `hi` message with `max_tokens: 1`; may affect quota or billing |
 
-- Codex: starts `codex app-server --listen stdio://` and reads account/rate-limit
-  data through the local CLI process.
-- Claude Code: reads local Claude Code OAuth credentials and makes a minimal
-  Anthropic Messages API request to inspect rate-limit headers.
-
-Agent Quota does not store provider API keys. Probes use local credentials in
-memory and normalize provider-specific responses into a small JSON model.
-
-## Prerequisites
-
-- Rust 1.88 or newer for local builds.
-- Codex CLI installed and signed in for Codex quota checks.
-- Claude Code installed and signed in for Claude Code quota checks.
-
-Missing or unsigned-in providers are reported as unavailable rather than
-blocking the whole status response.
+Credentials are read into memory and are never stored by Agent Quota. Source
+code, repository contents, terminal history, and user prompts are not sent.
 
 ## Install
 
-From GitHub:
+### Prebuilt binary
+
+Download the archive for your operating system from
+[GitHub Releases](https://github.com/Halven08/agent-quota/releases), extract
+`agent-quota`, and place it somewhere on your `PATH`.
+
+### Build with Cargo
+
+Rust 1.88 or newer is required:
 
 ```bash
-cargo install --git https://github.com/Halven08/agent-quota agent-quota
+cargo install --git https://github.com/Halven08/agent-quota --tag v0.3.0 agent-quota
 ```
 
 From a local checkout:
@@ -52,8 +50,17 @@ From a local checkout:
 cargo install --path crates/agent-quota-cli
 ```
 
-The CLI is currently distributed from GitHub. crates.io publishing will come
-after the core API stabilizes.
+Provider prerequisites:
+
+- Install and sign in to the Codex CLI for Codex checks.
+- Sign in with Claude Code once so its local credential file exists. Agent Quota
+  reads that file but does not invoke the Claude Code executable.
+
+Verify setup without making quota requests:
+
+```bash
+agent-quota doctor
+```
 
 ## CLI
 
@@ -61,54 +68,66 @@ after the core API stabilizes.
 agent-quota status
 agent-quota status --json
 agent-quota status --provider codex
-agent-quota status --config agent-quota.toml
 agent-quota status --config agent-quota.toml --profile claude-work
-agent-quota watch --interval 60
+agent-quota watch --interval 300
+agent-quota watch --json
+agent-quota doctor --config agent-quota.toml
 agent-quota profiles list --config agent-quota.toml
 ```
 
-Example JSON shape:
+Example terminal output:
 
-```json
-[
-  {
-    "providerId": "codex",
-    "providerName": "Codex",
-    "profileId": "codex",
-    "profileName": "Codex",
-    "accountLabel": "you@example.com",
-    "source": "codex_app_server",
-    "status": "available",
-    "plan": "Plus",
-    "windows": [
-      {
-        "kind": "five_hour",
-        "label": "5h window",
-        "usedPercent": 42,
-        "remainingPercent": 58,
-        "windowMinutes": 300,
-        "resetsAt": 1730947200,
-        "detail": null
-      }
-    ],
-    "updatedAt": 1730000000000,
-    "message": null
-  }
-]
+```text
+Provider/profile      Plan/account             Quota
+--------------------  -----------------------  ----------------------------------------
+Codex                 Plus / you@example.com   5h window: 58% left, resets in 2h 8m
+Claude Work           Max                     EXHAUSTED — Weekly window: 0% left
 ```
 
-## Multi-account profiles
+Reset times include a relative duration and an RFC 3339 timestamp in the local
+time zone. Watch intervals must be at least 60 seconds. Results are cached for
+five minutes, and completely failed checks are not cached.
 
-Agent Quota can check multiple local accounts through profiles. Profiles are
-labels plus paths/env overrides; they do not contain API keys or OAuth tokens.
+`watch --json` emits one compact JSON array per line (NDJSON). A one-shot status
+command emits pretty JSON.
+
+### Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Command completed; at least one requested probe succeeded, or no probe was required |
+| `1` | Configuration, diagnostics, or serialization failed |
+| `2` | Command-line usage error |
+| `3` | Every requested provider probe failed |
+
+An exhausted quota is a successful probe and therefore does not itself produce
+a failing process exit code. Read `quotaState` when automating routing.
+
+## Snapshot contract
+
+Serialized snapshots include `schemaVersion: 1`. The two decision fields are:
+
+- `probeStatus`: `ok`, `authentication_required`, `unsupported`,
+  `transient_error`, `invalid_response`, or `invalid_configuration`.
+- `quotaState`: `available`, `exhausted`, or `unknown`.
+
+Only `probeStatus == "ok"` together with `quotaState == "available"` is a safe
+positive routing signal.
+
+`observedAtMs` uses Unix epoch milliseconds.
+`resetsAtEpochSeconds` uses Unix epoch seconds.
+
+See the [schema notes](docs/snapshot-schema-v1.md) and the
+[canonical JSON fixture](crates/agent-quota-core/fixtures/provider-usage-v1.json).
+Downstream projects such as Janus should test against that fixture and reject
+unknown schema versions.
+
+## Multiple accounts
+
+Profiles label local accounts and provide paths or environment overrides. They
+must not contain OAuth tokens or API keys.
 
 ```toml
-[[profiles]]
-id = "claude-private"
-provider = "claude"
-label = "Claude Private"
-credentials_path = "C:/Users/you/.claude-private/.credentials.json"
-
 [[profiles]]
 id = "claude-work"
 provider = "claude"
@@ -124,46 +143,82 @@ label = "Codex Private"
 CODEX_HOME = "C:/Users/you/.codex-private"
 ```
 
-See [`agent-quota.example.toml`](agent-quota.example.toml) for a starter file.
-Codex multi-account support depends on the installed Codex CLI honoring the
-environment/config override you provide. Claude profiles can point directly at
-different Claude Code credential files.
+See [`agent-quota.example.toml`](agent-quota.example.toml) for a complete
+starter file.
+
+Profile IDs must be unique and non-empty. Unknown configuration fields are
+rejected so spelling mistakes fail visibly. Supported provider-specific fields:
+
+| Field | Codex | Claude |
+| --- | --- | --- |
+| `command_path` | Optional executable path | Not supported |
+| `credentials_path` | Not supported | Optional credential file |
+| `env` | Optional process overrides | Not supported |
+| `enabled` | Supported | Supported |
+
+Codex multi-account behavior depends on whether the installed Codex CLI honors
+the supplied environment or configuration override.
 
 ## Library
 
-```rust
-use agent_quota_core::{
-    collect_usage, AgentQuotaConfig, CollectUsageOptions,
-};
+Pin the exact `0.x` release:
 
-let snapshots = collect_usage(CollectUsageOptions::all()).await;
-
-let config = AgentQuotaConfig::load("agent-quota.toml")?;
-let snapshots = collect_usage(
-    CollectUsageOptions::profiles(config.profiles())
-).await;
+```toml
+[dependencies]
+agent-quota-core = "=0.3.0"
 ```
 
-## Status
+```rust,no_run
+use agent_quota_core::{
+    AgentQuotaClient, CollectUsageOptions, ProbeStatus, QuotaState,
+};
 
-Early extraction from Janus. The API is intentionally small, but provider probes
-are best-effort and may need updates when CLIs, credential files, or response
-headers change.
+# async fn example() {
+let snapshots = AgentQuotaClient::new()
+    .collect_usage(CollectUsageOptions::all())
+    .await;
 
-## Privacy and provider impact
+for snapshot in snapshots {
+    let can_run = snapshot.probe_status == ProbeStatus::Ok
+        && snapshot.quota_state == QuotaState::Available;
+    println!("{}: {can_run}", snapshot.profile_name);
+}
+# }
+```
 
-Agent Quota is local-first and does not store provider credentials. The current
-Claude Code probe reads the local Claude Code OAuth token into memory and sends a
-minimal Anthropic Messages API request with a fixed `"hi"` prompt so it can read
-rate-limit headers from the response. It does not send source code, repository
-contents, terminal history, or arbitrary user prompts.
+For UI polling, use `ProviderUsageCache::collect`; each complete profile is
+keyed independently, so a failed profile can recover while successful profiles
+remain cached. Custom HTTP clients, provider timeouts, Claude model, and Claude
+endpoint overrides are available for embedding and deterministic tests.
 
-Because the Claude Code probe calls the Anthropic API, it may touch provider
-quota or billing according to your Anthropic/Claude subscription behavior. The
-Codex probe talks to the local `codex app-server` process and asks it for account
-and rate-limit state.
+## Troubleshooting
 
-## Not official
+Start with:
 
-Agent Quota is not an official OpenAI, Anthropic, Codex, or Claude Code product.
-It relies on local CLI behavior and provider-exposed/local data where available.
+```bash
+agent-quota doctor
+```
+
+- **Executable not found:** install the relevant CLI or set
+  `command_path` for a Codex profile.
+- **Authentication required:** sign in again with the provider CLI. Failed
+  checks are not cached, so the next status command retries immediately.
+- **Unsupported:** update the provider CLI. The installed provider may no
+  longer expose the response shape Agent Quota understands.
+- **Invalid response:** include the Agent Quota version, provider CLI version,
+  operating system, and redacted JSON error in a bug report. Never attach
+  credential files.
+- **Claude provider impact:** use the default five-minute cache and avoid
+  repeatedly forcing fresh collections in embedded applications.
+
+## Project status
+
+Agent Quota is an early `0.x` extraction from Janus. The serialized schema is
+explicitly versioned, but the Rust API may evolve between minor releases until
+`1.0`. Pin releases, review [`CHANGELOG.md`](CHANGELOG.md), and keep an adapter
+between Agent Quota and application-specific routing policy.
+
+Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and report
+security concerns according to [`SECURITY.md`](SECURITY.md).
+
+Licensed under the [MIT License](LICENSE).
