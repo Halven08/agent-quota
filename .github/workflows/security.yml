@@ -14,11 +14,20 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   audit:
+    # Avoid all hosted-runner charges while the repository is private.
+    if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Install current stable Rust
         run: rustup toolchain install stable --profile minimal
       - name: Install cargo-audit

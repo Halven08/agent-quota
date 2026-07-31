@@ -2,20 +2,31 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  quality:
+    # Standard hosted runners are billable for private repositories. Keep all
+    # automated CI disabled until this repository is public.
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
       - name: Install Rust 1.88
         run: rustup toolchain install 1.88 --profile minimal --component rustfmt,clippy
       - run: cargo fmt --all --check
@@ -23,3 +34,22 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo run -p agent-quota --locked -- profiles list --config agent-quota.example.toml --json
       - run: cargo package -p agent-quota-core --locked
+
+  platforms:
+    # Pull requests use the Linux quality job. Cross-platform validation runs
+    # only after a change reaches main, and only when hosted minutes are free.
+    if: ${{ !github.event.repository.private && github.event_name == 'push' }}
+    needs: quality
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal
+      - run: cargo test --workspace --locked
