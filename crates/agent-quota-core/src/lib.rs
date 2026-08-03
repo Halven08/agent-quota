@@ -1482,10 +1482,14 @@ mod tests {
     use super::*;
     use reqwest::header::{HeaderName, HeaderValue};
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
+    use std::time::Instant;
+
+    static TEST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn header_map(entries: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1506,9 +1510,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener.local_addr().expect("listener should have address");
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request should connect");
+            let mut stream = accept_test_connection(&listener);
             let mut request = [0_u8; 8_192];
-            let _ = stream.read(&mut request);
+            let bytes = stream.read(&mut request).expect("request should read");
+            assert!(bytes > 0, "request should not be empty");
             thread::sleep(delay);
             let response = format!(
                 "HTTP/1.1 {status}\r\ncontent-length: 2\r\nconnection: close\r\n{headers}\r\n{{}}"
@@ -1518,11 +1523,46 @@ mod tests {
         (format!("http://{address}/v1/messages"), server)
     }
 
+    fn accept_test_connection(listener: &TcpListener) -> TcpStream {
+        listener
+            .set_nonblocking(true)
+            .expect("test listener should become nonblocking");
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("test stream should become blocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("test stream should have a read timeout");
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(5)))
+                        .expect("test stream should have a write timeout");
+                    return stream;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    panic!("request did not connect before the test deadline");
+                }
+                Err(error) => panic!("request should connect: {error}"),
+            }
+        }
+    }
+
     fn temporary_claude_credentials() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "agent-quota-test-{}-{}.json",
+            "agent-quota-test-{}-{}-{}.json",
             std::process::id(),
-            now_epoch_ms()
+            now_epoch_ms(),
+            TEST_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"test-token"}}"#)
             .expect("credentials fixture should write");
@@ -1825,7 +1865,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
         let address = listener.local_addr().expect("listener should have address");
         let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("request should connect");
+            let mut stream = accept_test_connection(&listener);
             let mut request = [0_u8; 8_192];
             let bytes = stream.read(&mut request).expect("request should read");
             let request = String::from_utf8_lossy(&request[..bytes]);
@@ -1906,10 +1946,10 @@ mod tests {
         server.join().expect("no-header server should finish");
         assert_eq!(snapshot.probe_status, ProbeStatus::Unsupported);
 
-        let (url, server) = start_http_server("200 OK", "", Duration::from_millis(100));
+        let (url, server) = start_http_server("200 OK", "", Duration::from_millis(500));
         let snapshot = AgentQuotaClient::new()
             .with_claude_api_url(url)
-            .with_timeouts(DEFAULT_CODEX_TIMEOUT, Duration::from_millis(10))
+            .with_timeouts(DEFAULT_CODEX_TIMEOUT, Duration::from_millis(250))
             .collect_profile_usage(profile)
             .await;
         server.join().expect("timeout server should finish");
