@@ -1485,8 +1485,11 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::Instant;
+
+    static TEST_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn header_map(entries: &[(&'static str, &'static str)]) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1556,9 +1559,10 @@ mod tests {
 
     fn temporary_claude_credentials() -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "agent-quota-test-{}-{}.json",
+            "agent-quota-test-{}-{}-{}.json",
             std::process::id(),
-            now_epoch_ms()
+            now_epoch_ms(),
+            TEST_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&path, r#"{"claudeAiOauth":{"accessToken":"test-token"}}"#)
             .expect("credentials fixture should write");
