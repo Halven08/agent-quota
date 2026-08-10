@@ -1,6 +1,6 @@
 # Agent Quota
 
-![Agent Quota - AI coding quota, locally.](docs/assets/agent-quota-social-preview.png)
+![Agent Quota - AI coding quota, locally.](docs/assets/agent-quota-social-preview.jpg)
 
 **Local-first Codex and Claude Code quota monitoring for terminals and developer tools.**
 
