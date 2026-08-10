@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "agent-quota-core"
 version = "0.3.0"
 description = "Local-credential quota probes for Codex, Claude Code, and AI coding agents"
@@ -9,7 +9,6 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 readme = "README.md"
-documentation = "https://docs.rs/agent-quota-core"
 keywords = ["ai", "cli", "codex", "claude", "quota"]
 categories = ["api-bindings", "development-tools"]
 

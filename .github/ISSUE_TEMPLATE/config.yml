@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/Halven08/agent-quota/security/advisories/new
+    about: Report vulnerabilities privately. Never post credentials in an issue.
+  - name: Usage and troubleshooting
+    url: https://github.com/Halven08/agent-quota#troubleshooting
+    about: Check setup diagnostics and common provider errors before opening an issue.

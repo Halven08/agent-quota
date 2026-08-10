@@ -5,12 +5,20 @@ versioning conventions appropriate for a pre-1.0 Rust crate.
 
 ## Unreleased
 
+### Changed
+
+- Improve public onboarding, install guidance, project presentation, and
+  community contribution paths.
+- Remove unpublished docs.rs metadata until hosted API documentation is
+  available.
+- Describe the compatibility fixture in implementation-neutral terms.
+
 ## v0.3.0 - 2026-07-30
 
 ### Added
 
 - Separate probe health and quota availability states with typed failure codes.
-- Versioned snapshot schema, explicit timestamp units, and a shared Janus
+- Versioned snapshot schema, explicit timestamp units, and a shared downstream
   compatibility fixture.
 - Selection-keyed five-minute cache that skips completely failed results.
 - Injectable HTTP client, Claude endpoint, and provider timeouts.
