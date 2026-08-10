@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 members = [
   "crates/agent-quota-core",
   "crates/agent-quota-cli",
@@ -20,5 +20,5 @@ reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
-toml = "0.8"
+toml = "1.1"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
