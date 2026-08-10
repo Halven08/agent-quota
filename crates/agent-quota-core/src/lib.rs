@@ -445,6 +445,17 @@ pub struct ProviderUsageSnapshot {
     pub error: Option<ProviderUsageError>,
 }
 
+impl ProviderUsageSnapshot {
+    /// Return whether this snapshot is a safe positive signal for new work.
+    ///
+    /// A probe must have completed successfully and reported available quota.
+    /// Keeping the two checks together prevents callers from treating an
+    /// unknown quota state or a failed probe as usable capacity.
+    pub fn is_ready(&self) -> bool {
+        self.probe_status == ProbeStatus::Ok && self.quota_state == QuotaState::Available
+    }
+}
+
 /// One provider quota window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1655,6 +1666,7 @@ mod tests {
             "unexpected snapshot: {snapshot:?}"
         );
         assert_eq!(snapshot.quota_state, QuotaState::Exhausted);
+        assert!(!snapshot.is_ready());
         assert_eq!(snapshot.account_label.as_deref(), Some("user@example.com"));
         assert_eq!(snapshot.windows.len(), 2);
     }
@@ -1744,6 +1756,7 @@ mod tests {
             .expect("headers should map");
         assert_eq!(snapshot.probe_status, ProbeStatus::Ok);
         assert_eq!(snapshot.quota_state, QuotaState::Available);
+        assert!(snapshot.is_ready());
         assert_eq!(snapshot.windows[0].remaining_percent, Some(58.0));
         assert_eq!(
             snapshot.windows[1].resets_at_epoch_seconds,

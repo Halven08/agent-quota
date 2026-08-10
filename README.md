@@ -20,6 +20,7 @@ developer dashboards.
 
 - One normalized, versioned snapshot for multiple providers.
 - Human-readable terminal output plus JSON and NDJSON for automation.
+- Script-friendly readiness checks with `any` and `all` profile policies.
 - Multi-account profiles with independent caching and failure handling.
 - No telemetry, credential storage, or source-code collection.
 
@@ -33,9 +34,10 @@ Install the latest tagged version with Cargo, verify local prerequisites, and
 check all available providers:
 
 ```bash
-cargo install --git https://github.com/Halven08/agent-quota --tag v0.3.0 agent-quota
+cargo install --git https://github.com/Halven08/agent-quota --tag v0.4.0 agent-quota
 agent-quota doctor
 agent-quota status
+agent-quota check --provider codex
 ```
 
 Use `agent-quota status --json` for a stable machine-readable snapshot. An
@@ -59,22 +61,22 @@ code, repository contents, terminal history, and user prompts are not sent.
 Download the archive for your operating system, extract `agent-quota` (or
 `agent-quota.exe`), and place it somewhere on your `PATH`.
 
-| Platform | v0.3.0 download |
+| Platform | v0.4.0 download |
 | --- | --- |
-| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-windows-x86_64.zip) |
-| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-linux-x86_64.tar.gz) |
-| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-macos-aarch64.tar.gz) |
-| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-macos-x86_64.tar.gz) |
+| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-windows-x86_64.zip) |
+| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-linux-x86_64.tar.gz) |
+| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-macos-aarch64.tar.gz) |
+| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-macos-x86_64.tar.gz) |
 
 Checksums are published in
-[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/SHA256SUMS).
+[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/SHA256SUMS).
 
 ### Build with Cargo
 
 Rust 1.88 or newer is required:
 
 ```bash
-cargo install --git https://github.com/Halven08/agent-quota --tag v0.3.0 agent-quota
+cargo install --git https://github.com/Halven08/agent-quota --tag v0.4.0 agent-quota
 ```
 
 From a local checkout:
@@ -102,6 +104,8 @@ agent-quota status
 agent-quota status --json
 agent-quota status --provider codex
 agent-quota status --config agent-quota.toml --profile claude-work
+agent-quota check --provider codex
+agent-quota check --config agent-quota.toml --require all
 agent-quota watch --interval 300
 agent-quota watch --json
 agent-quota doctor --config agent-quota.toml
@@ -124,6 +128,18 @@ five minutes, and completely failed checks are not cached.
 `watch --json` emits one compact JSON array per line (NDJSON). A one-shot status
 command emits pretty JSON.
 
+### Readiness checks
+
+`agent-quota check` turns the normalized snapshot into a process-level readiness
+gate. By default, it succeeds when **any** selected profile has both
+`probeStatus: ok` and `quotaState: available`. Use `--require all` when every
+selected profile must be ready.
+
+The command prints the normal status output followed by a readiness summary.
+With `--json`, it emits the unchanged snapshot schema and communicates the
+decision through its exit code. Probe failure takes precedence over readiness:
+when every probe fails, the command returns `3` rather than `4`.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -132,9 +148,11 @@ command emits pretty JSON.
 | `1` | Configuration, diagnostics, or serialization failed |
 | `2` | Command-line usage error |
 | `3` | Every requested provider probe failed |
+| `4` | `check` completed, but the requested `any`/`all` readiness policy was not satisfied |
 
-An exhausted quota is a successful probe and therefore does not itself produce
-a failing process exit code. Read `quotaState` when automating routing.
+An exhausted quota is still a successful probe: `status` does not fail for it,
+while `check` returns `4` when exhaustion leaves its readiness policy unmet.
+Read `quotaState` when automating custom routing.
 
 ## Snapshot contract
 
@@ -199,13 +217,11 @@ The library is currently distributed from tagged GitHub releases. Pin the exact
 
 ```toml
 [dependencies]
-agent-quota-core = { git = "https://github.com/Halven08/agent-quota", tag = "v0.3.0" }
+agent-quota-core = { git = "https://github.com/Halven08/agent-quota", tag = "v0.4.0" }
 ```
 
 ```rust,no_run
-use agent_quota_core::{
-    AgentQuotaClient, CollectUsageOptions, ProbeStatus, QuotaState,
-};
+use agent_quota_core::{AgentQuotaClient, CollectUsageOptions};
 
 # async fn example() {
 let snapshots = AgentQuotaClient::new()
@@ -213,9 +229,7 @@ let snapshots = AgentQuotaClient::new()
     .await;
 
 for snapshot in snapshots {
-    let can_run = snapshot.probe_status == ProbeStatus::Ok
-        && snapshot.quota_state == QuotaState::Available;
-    println!("{}: {can_run}", snapshot.profile_name);
+    println!("{}: {}", snapshot.profile_name, snapshot.is_ready());
 }
 # }
 ```

@@ -16,6 +16,7 @@ use tokio::time::{sleep, timeout};
 const DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const MINIMUM_INTERVAL_SECONDS: u64 = 60;
 const ALL_PROBES_FAILED_EXIT_CODE: i32 = 3;
+const READINESS_NOT_SATISFIED_EXIT_CODE: i32 = 4;
 
 #[derive(Debug, Clone)]
 struct CliOptions {
@@ -27,14 +28,24 @@ struct CliOptions {
     providers: Vec<ProviderId>,
     profiles: Vec<String>,
     config_path: Option<PathBuf>,
+    readiness_policy: ReadinessPolicy,
+    readiness_policy_explicit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliCommand {
     Status,
+    Check,
     ProfilesList,
     Doctor,
     Help,
+    Version,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadinessPolicy {
+    Any,
+    All,
 }
 
 impl Default for CliOptions {
@@ -48,6 +59,8 @@ impl Default for CliOptions {
             providers: Vec::new(),
             profiles: Vec::new(),
             config_path: None,
+            readiness_policy: ReadinessPolicy::Any,
+            readiness_policy_explicit: false,
         }
     }
 }
@@ -77,12 +90,16 @@ async fn main() {
         print_usage(false);
         return;
     }
+    if options.command == CliCommand::Version {
+        println!("agent-quota {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     match options.command {
         CliCommand::ProfilesList => run_profiles_list(&options),
         CliCommand::Doctor => run_doctor(&options).await,
-        CliCommand::Status => run_status(&options).await,
-        CliCommand::Help => unreachable!("help returned above"),
+        CliCommand::Status | CliCommand::Check => run_status(&options).await,
+        CliCommand::Help | CliCommand::Version => unreachable!("handled above"),
     }
 }
 
@@ -114,20 +131,66 @@ async fn run_status(options: &CliOptions) {
             }
         } else {
             print_table(&snapshots);
+            if options.command == CliCommand::Check {
+                print_readiness_summary(&snapshots, options.readiness_policy);
+            }
         }
 
         if !options.watch {
-            if !snapshots.is_empty()
-                && snapshots
-                    .iter()
-                    .all(|snapshot| snapshot.probe_status != ProbeStatus::Ok)
-            {
-                process::exit(ALL_PROBES_FAILED_EXIT_CODE);
+            let exit_code =
+                snapshot_exit_code(options.command, options.readiness_policy, &snapshots);
+            if exit_code != 0 {
+                process::exit(exit_code);
             }
             break;
         }
         sleep(Duration::from_secs(options.interval_seconds)).await;
     }
+}
+
+fn readiness_satisfied(snapshots: &[ProviderUsageSnapshot], policy: ReadinessPolicy) -> bool {
+    match policy {
+        ReadinessPolicy::Any => snapshots.iter().any(ProviderUsageSnapshot::is_ready),
+        ReadinessPolicy::All => {
+            !snapshots.is_empty() && snapshots.iter().all(ProviderUsageSnapshot::is_ready)
+        }
+    }
+}
+
+fn snapshot_exit_code(
+    command: CliCommand,
+    policy: ReadinessPolicy,
+    snapshots: &[ProviderUsageSnapshot],
+) -> i32 {
+    if !snapshots.is_empty()
+        && snapshots
+            .iter()
+            .all(|snapshot| snapshot.probe_status != ProbeStatus::Ok)
+    {
+        ALL_PROBES_FAILED_EXIT_CODE
+    } else if command == CliCommand::Check && !readiness_satisfied(snapshots, policy) {
+        READINESS_NOT_SATISFIED_EXIT_CODE
+    } else {
+        0
+    }
+}
+
+fn print_readiness_summary(snapshots: &[ProviderUsageSnapshot], policy: ReadinessPolicy) {
+    let ready_count = snapshots
+        .iter()
+        .filter(|snapshot| snapshot.is_ready())
+        .count();
+    let ready = readiness_satisfied(snapshots, policy);
+    let policy_label = match policy {
+        ReadinessPolicy::Any => "any",
+        ReadinessPolicy::All => "all",
+    };
+    println!();
+    println!(
+        "Readiness: {} ({ready_count} of {} profiles ready; policy: {policy_label})",
+        if ready { "READY" } else { "NOT READY" },
+        snapshots.len()
+    );
 }
 
 fn run_profiles_list(options: &CliOptions) {
@@ -288,6 +351,13 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         options.command = CliCommand::Help;
         return Ok(options);
     }
+    if matches!(
+        args.first().map(String::as_str),
+        Some("version" | "--version" | "-V")
+    ) {
+        options.command = CliCommand::Version;
+        return Ok(options);
+    }
 
     match args.first().map(String::as_str) {
         Some("watch") => {
@@ -295,6 +365,10 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
             index = 1;
         }
         Some("status") => index = 1,
+        Some("check") => {
+            options.command = CliCommand::Check;
+            index = 1;
+        }
         Some("doctor") => {
             options.command = CliCommand::Doctor;
             index = 1;
@@ -318,7 +392,27 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
                 options.command = CliCommand::Help;
                 return Ok(options);
             }
+            "--version" | "-V" => {
+                options.command = CliCommand::Version;
+                return Ok(options);
+            }
             "--json" => options.json = true,
+            "--require" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--require requires any or all".to_owned())?;
+                options.readiness_policy = match raw.as_str() {
+                    "any" => ReadinessPolicy::Any,
+                    "all" => ReadinessPolicy::All,
+                    _ => {
+                        return Err(format!(
+                            "invalid readiness policy `{raw}`; expected any or all"
+                        ))
+                    }
+                };
+                options.readiness_policy_explicit = true;
+            }
             "--watch" => options.watch = true,
             "--provider" | "-p" => {
                 index += 1;
@@ -367,6 +461,12 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
 }
 
 fn validate_options(options: &CliOptions) -> Result<(), String> {
+    if options.readiness_policy_explicit && options.command != CliCommand::Check {
+        return Err("--require can only be used with check".to_owned());
+    }
+    if options.command == CliCommand::Check && options.watch {
+        return Err("check does not support --watch".to_owned());
+    }
     if !options.profiles.is_empty() && options.config_path.is_none() {
         return Err("--profile requires --config".to_owned());
     }
@@ -475,14 +575,17 @@ fn print_usage(stderr: bool) {
         "USAGE:",
         "  agent-quota [status] [--json] [--provider codex|claude]",
         "  agent-quota status --config <path> [--profile <id>]",
+        "  agent-quota check [--require any|all] [--json] [filters]",
         "  agent-quota watch [--json] [--interval <seconds>] [filters]",
         "  agent-quota doctor [--json] [--config <path>] [filters]",
         "  agent-quota profiles list --config <path> [--json]",
+        "  agent-quota --version",
         "",
         "NOTES:",
         "  Watch intervals must be at least 60 seconds and use a five-minute cache.",
         "  `watch --json` emits one compact JSON value per line (NDJSON).",
-        "  Exit code 3 means every requested provider probe failed.",
+        "  `check` defaults to requiring any selected profile to be ready.",
+        "  Exit code 3 means every probe failed; 4 means readiness was not satisfied.",
     ];
     for line in lines {
         if stderr {
@@ -657,12 +760,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_doctor_and_help() {
+    fn parses_doctor_help_check_and_version() {
         let doctor =
             parse_args(vec!["doctor".to_owned(), "--json".to_owned()]).expect("doctor parses");
         assert_eq!(doctor.command, CliCommand::Doctor);
         let help = parse_args(vec!["--help".to_owned()]).expect("help parses");
         assert_eq!(help.command, CliCommand::Help);
+        let check = parse_args(vec![
+            "check".to_owned(),
+            "--require".to_owned(),
+            "all".to_owned(),
+        ])
+        .expect("check parses");
+        assert_eq!(check.command, CliCommand::Check);
+        assert_eq!(check.readiness_policy, ReadinessPolicy::All);
+        let version = parse_args(vec!["--version".to_owned()]).expect("version parses");
+        assert_eq!(version.command, CliCommand::Version);
     }
 
     #[test]
@@ -685,6 +798,29 @@ mod tests {
     }
 
     #[test]
+    fn rejects_irrelevant_readiness_options() {
+        let status_policy = parse_args(vec![
+            "status".to_owned(),
+            "--require".to_owned(),
+            "all".to_owned(),
+        ])
+        .expect_err("status readiness policy should fail");
+        assert_eq!(status_policy, "--require can only be used with check");
+
+        let check_watch = parse_args(vec!["check".to_owned(), "--watch".to_owned()])
+            .expect_err("check watch should fail");
+        assert_eq!(check_watch, "check does not support --watch");
+
+        let invalid_policy = parse_args(vec![
+            "check".to_owned(),
+            "--require".to_owned(),
+            "some".to_owned(),
+        ])
+        .expect_err("invalid readiness policy should fail");
+        assert!(invalid_policy.contains("expected any or all"));
+    }
+
+    #[test]
     fn rejects_profile_without_config() {
         let error = parse_args(vec![
             "status".to_owned(),
@@ -693,6 +829,56 @@ mod tests {
         ])
         .expect_err("profile without config should fail");
         assert_eq!(error, "--profile requires --config");
+    }
+
+    fn snapshot(probe_status: ProbeStatus, quota_state: QuotaState) -> ProviderUsageSnapshot {
+        ProviderUsageSnapshot {
+            schema_version: 1,
+            provider_id: ProviderId::Codex,
+            provider_name: "Codex".to_owned(),
+            profile_id: "codex".to_owned(),
+            profile_name: "Codex".to_owned(),
+            account_label: None,
+            source: None,
+            probe_status,
+            quota_state,
+            plan: None,
+            windows: Vec::new(),
+            observed_at_ms: 0,
+            message: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn evaluates_any_and_all_readiness_policies() {
+        let ready = snapshot(ProbeStatus::Ok, QuotaState::Available);
+        let exhausted = snapshot(ProbeStatus::Ok, QuotaState::Exhausted);
+        let failed = snapshot(ProbeStatus::TransientError, QuotaState::Unknown);
+
+        assert!(readiness_satisfied(
+            &[ready.clone(), exhausted.clone()],
+            ReadinessPolicy::Any
+        ));
+        assert!(!readiness_satisfied(
+            &[ready.clone(), exhausted.clone()],
+            ReadinessPolicy::All
+        ));
+        assert!(readiness_satisfied(&[ready.clone()], ReadinessPolicy::All));
+        assert!(!readiness_satisfied(&[], ReadinessPolicy::Any));
+
+        assert_eq!(
+            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[ready]),
+            0
+        );
+        assert_eq!(
+            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[exhausted]),
+            READINESS_NOT_SATISFIED_EXIT_CODE
+        );
+        assert_eq!(
+            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[failed]),
+            ALL_PROBES_FAILED_EXIT_CODE
+        );
     }
 
     #[test]

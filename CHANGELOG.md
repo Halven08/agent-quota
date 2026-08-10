@@ -3,13 +3,22 @@
 All notable changes are documented here. The project follows semantic
 versioning conventions appropriate for a pre-1.0 Rust crate.
 
-## Unreleased
+## v0.4.0 - 2026-08-10
+
+### Added
+
+- Add `agent-quota check` as a script-friendly readiness gate with `any` and
+  `all` profile policies.
+- Add `ProviderUsageSnapshot::is_ready()` for the safe positive routing signal.
+- Add `agent-quota --version` and a dedicated readiness exit code.
 
 ### Changed
 
 - Refresh the locked serde, serde_json, and Tokio dependencies.
 - Upgrade the TOML parser from 0.8 to 1.1 while preserving strict config validation.
 - Refresh the locked time dependency to 0.3.55.
+- Bump `agent-quota-core` and the CLI to `0.4.0`.
+- Preserve snapshot schema v1; `check --json` emits the existing snapshot shape.
 - Improve public onboarding, install guidance, project presentation, and
   community contribution paths.
 - Remove unpublished docs.rs metadata until hosted API documentation is
