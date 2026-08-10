@@ -8,6 +8,7 @@ versioning conventions appropriate for a pre-1.0 Rust crate.
 ### Changed
 
 - Refresh the locked serde, serde_json, and Tokio dependencies.
+- Upgrade the TOML parser from 0.8 to 1.1 while preserving strict config validation.
 - Improve public onboarding, install guidance, project presentation, and
   community contribution paths.
 - Remove unpublished docs.rs metadata until hosted API documentation is
