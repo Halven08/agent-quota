@@ -7,6 +7,7 @@ versioning conventions appropriate for a pre-1.0 Rust crate.
 
 ### Changed
 
+- Refresh the locked serde, serde_json, and Tokio dependencies.
 - Improve public onboarding, install guidance, project presentation, and
   community contribution paths.
 - Remove unpublished docs.rs metadata until hosted API documentation is
