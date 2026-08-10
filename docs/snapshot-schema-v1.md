@@ -2,8 +2,7 @@
 
 The canonical example is
 [`provider-usage-v1.json`](../crates/agent-quota-core/fixtures/provider-usage-v1.json).
-Agent Quota and downstream consumers such as Janus can use this file as a
-contract fixture.
+Agent Quota and downstream consumers can use this file as a contract fixture.
 
 ## Decision fields
 

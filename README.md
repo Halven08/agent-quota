@@ -1,9 +1,13 @@
 # Agent Quota
 
-One-glance quota status for Codex, Claude Code, and tools that embed them.
+![Agent Quota - AI coding quota, locally.](docs/assets/agent-quota-social-preview.png)
+
+**Local-first Codex and Claude Code quota monitoring for terminals and developer tools.**
 
 [![CI](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml)
 [![Security audit](https://github.com/Halven08/agent-quota/actions/workflows/security.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/security.yml)
+[![Latest release](https://img.shields.io/github/v/release/Halven08/agent-quota)](https://github.com/Halven08/agent-quota/releases/latest)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Agent Quota is a Rust library and CLI that answers two separate questions:
 
@@ -11,12 +15,32 @@ Agent Quota is a Rust library and CLI that answers two separate questions:
 2. Does the reported quota have room for another agent run?
 
 Keeping those answers separate makes Agent Quota suitable for terminal use and
-for embedding in desktop applications such as Janus, Tauri or Electron apps,
-status bars, and internal developer dashboards.
+for embedding in desktop applications, status bars, CI helpers, and internal
+developer dashboards.
+
+- One normalized, versioned snapshot for multiple providers.
+- Human-readable terminal output plus JSON and NDJSON for automation.
+- Multi-account profiles with independent caching and failure handling.
+- No telemetry, credential storage, or source-code collection.
 
 > [!IMPORTANT]
 > Agent Quota is an independent project, not an official OpenAI, Anthropic,
 > Codex, or Claude Code product. Provider interfaces can change.
+
+## Quick start
+
+Install the latest tagged version with Cargo, verify local prerequisites, and
+check all available providers:
+
+```bash
+cargo install --git https://github.com/Halven08/agent-quota --tag v0.3.0 agent-quota
+agent-quota doctor
+agent-quota status
+```
+
+Use `agent-quota status --json` for a stable machine-readable snapshot. An
+exhausted quota is reported as valid data; provider or authentication failures
+are reported separately.
 
 ## Provider support
 
@@ -32,9 +56,18 @@ code, repository contents, terminal history, and user prompts are not sent.
 
 ### Prebuilt binary
 
-Download the archive for your operating system from
-[GitHub Releases](https://github.com/Halven08/agent-quota/releases), extract
-`agent-quota`, and place it somewhere on your `PATH`.
+Download the archive for your operating system, extract `agent-quota` (or
+`agent-quota.exe`), and place it somewhere on your `PATH`.
+
+| Platform | v0.3.0 download |
+| --- | --- |
+| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-windows-x86_64.zip) |
+| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-linux-x86_64.tar.gz) |
+| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-macos-aarch64.tar.gz) |
+| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/agent-quota-macos-x86_64.tar.gz) |
+
+Checksums are published in
+[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.3.0/SHA256SUMS).
 
 ### Build with Cargo
 
@@ -119,8 +152,8 @@ positive routing signal.
 
 See the [schema notes](docs/snapshot-schema-v1.md) and the
 [canonical JSON fixture](crates/agent-quota-core/fixtures/provider-usage-v1.json).
-Downstream projects such as Janus should test against that fixture and reject
-unknown schema versions.
+Downstream consumers should test against that fixture and reject unknown schema
+versions.
 
 ## Multiple accounts
 
@@ -161,11 +194,12 @@ the supplied environment or configuration override.
 
 ## Library
 
-Pin the exact `0.x` release:
+The library is currently distributed from tagged GitHub releases. Pin the exact
+`0.x` tag:
 
 ```toml
 [dependencies]
-agent-quota-core = "=0.3.0"
+agent-quota-core = { git = "https://github.com/Halven08/agent-quota", tag = "v0.3.0" }
 ```
 
 ```rust,no_run
@@ -213,12 +247,13 @@ agent-quota doctor
 
 ## Project status
 
-Agent Quota is an early `0.x` extraction from Janus. The serialized schema is
-explicitly versioned, but the Rust API may evolve between minor releases until
-`1.0`. Pin releases, review [`CHANGELOG.md`](CHANGELOG.md), and keep an adapter
-between Agent Quota and application-specific routing policy.
+Agent Quota is an early `0.x` public release. The serialized schema is explicitly
+versioned, but the Rust API may evolve between minor releases until `1.0`. Pin
+releases, review [`CHANGELOG.md`](CHANGELOG.md), and keep an adapter between
+Agent Quota and application-specific routing policy.
 
 Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and report
-security concerns according to [`SECURITY.md`](SECURITY.md).
+security concerns according to [`SECURITY.md`](SECURITY.md). Participation is
+governed by the [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
 Licensed under the [MIT License](LICENSE).
