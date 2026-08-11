@@ -1,6 +1,6 @@
 ﻿[package]
 name = "agent-quota"
-version = "0.4.0"
+version = "0.4.1"
 description = "CLI for checking local AI coding agent quota status"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,16 +8,38 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
-publish = false
+readme = "../../README.md"
+keywords = ["ai", "cli", "codex", "claude", "quota"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "agent-quota"
 path = "src/main.rs"
 
 [dependencies]
-agent-quota-core = { path = "../agent-quota-core" }
+agent-quota-core = { version = "0.4.1", path = "../agent-quota-core" }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tokio.workspace = true
+
+[package.metadata.binstall]
+bin-dir = "{ bin }{ binary-ext }"
+disabled-strategies = ["quick-install"]
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/agent-quota-linux-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/agent-quota-windows-x86_64.zip"
+pkg-fmt = "zip"
+
+[package.metadata.binstall.overrides.x86_64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/agent-quota-macos-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-apple-darwin]
+pkg-url = "{ repo }/releases/download/v{ version }/agent-quota-macos-aarch64.tar.gz"
+pkg-fmt = "tgz"
