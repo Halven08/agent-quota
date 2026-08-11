@@ -7,7 +7,11 @@
 [![CI](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/ci.yml)
 [![Security audit](https://github.com/Halven08/agent-quota/actions/workflows/security.yml/badge.svg)](https://github.com/Halven08/agent-quota/actions/workflows/security.yml)
 [![Latest release](https://img.shields.io/github/v/release/Halven08/agent-quota)](https://github.com/Halven08/agent-quota/releases/latest)
+[![Crates.io](https://img.shields.io/crates/v/agent-quota.svg)](https://crates.io/crates/agent-quota)
+[![API docs](https://docs.rs/agent-quota-core/badge.svg)](https://docs.rs/agent-quota-core)
 [![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+![Agent Quota terminal demo showing diagnostics, quota status, and readiness checks](docs/assets/agent-quota-terminal-demo.gif)
 
 Agent Quota is a Rust library and CLI that answers two separate questions:
 
@@ -30,11 +34,11 @@ developer dashboards.
 
 ## Quick start
 
-Install the latest tagged version with Cargo, verify local prerequisites, and
-check all available providers:
+Install with Cargo, verify local prerequisites, and check all available
+providers:
 
 ```bash
-cargo install --git https://github.com/Halven08/agent-quota --tag v0.4.0 agent-quota
+cargo install agent-quota --locked
 agent-quota doctor
 agent-quota status
 agent-quota check --provider codex
@@ -61,22 +65,29 @@ code, repository contents, terminal history, and user prompts are not sent.
 Download the archive for your operating system, extract `agent-quota` (or
 `agent-quota.exe`), and place it somewhere on your `PATH`.
 
-| Platform | v0.4.0 download |
+| Platform | v0.4.1 download |
 | --- | --- |
-| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-windows-x86_64.zip) |
-| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-linux-x86_64.tar.gz) |
-| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-macos-aarch64.tar.gz) |
-| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/agent-quota-macos-x86_64.tar.gz) |
+| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-windows-x86_64.zip) |
+| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-linux-x86_64.tar.gz) |
+| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-macos-aarch64.tar.gz) |
+| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-macos-x86_64.tar.gz) |
 
 Checksums are published in
-[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.4.0/SHA256SUMS).
+[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/SHA256SUMS).
 
 ### Build with Cargo
 
 Rust 1.88 or newer is required:
 
 ```bash
-cargo install --git https://github.com/Halven08/agent-quota --tag v0.4.0 agent-quota
+cargo install agent-quota --locked
+```
+
+If you already use [Cargo Binstall](https://github.com/cargo-bins/cargo-binstall),
+install the matching prebuilt GitHub release without compiling:
+
+```bash
+cargo binstall agent-quota
 ```
 
 From a local checkout:
@@ -212,12 +223,12 @@ the supplied environment or configuration override.
 
 ## Library
 
-The library is currently distributed from tagged GitHub releases. Pin the exact
-`0.x` tag:
+The library is published on crates.io and from tagged GitHub releases. Pin the
+exact `0.x` version:
 
 ```toml
 [dependencies]
-agent-quota-core = { git = "https://github.com/Halven08/agent-quota", tag = "v0.4.0" }
+agent-quota-core = "=0.4.1"
 ```
 
 ```rust,no_run

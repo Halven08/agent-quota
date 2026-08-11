@@ -3,6 +3,24 @@
 All notable changes are documented here. The project follows semantic
 versioning conventions appropriate for a pre-1.0 Rust crate.
 
+## v0.4.1 - 2026-08-11
+
+### Added
+
+- Publish `agent-quota` and `agent-quota-core` through crates.io for standard
+  Cargo installation and hosted API documentation.
+- Add Cargo Binstall metadata for the existing Linux, Windows, and macOS
+  release archives without using the third-party QuickInstall fallback.
+- Add a compact terminal demo to make the primary workflow immediately visible.
+
+### Changed
+
+- Update install and library guidance for registry-based distribution.
+- Verify the core crate archive in CI; publish and verify the CLI after the
+  matching core version reaches crates.io.
+- Bump `agent-quota-core` and the CLI to `0.4.1` without changing snapshot
+  schema v1 or readiness behavior.
+
 ## v0.4.0 - 2026-08-10
 
 ### Added
