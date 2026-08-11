@@ -25,6 +25,7 @@ developer dashboards.
 - One normalized, versioned snapshot for multiple providers.
 - Human-readable terminal output plus JSON and NDJSON for automation.
 - Script-friendly readiness checks with `any` and `all` profile policies.
+- Versioned capability and diagnostic reports for integrating applications.
 - Multi-account profiles with independent caching and failure handling.
 - No telemetry, credential storage, or source-code collection.
 
@@ -40,6 +41,7 @@ providers:
 ```bash
 cargo install agent-quota --locked
 agent-quota doctor
+agent-quota capabilities
 agent-quota status
 agent-quota check --provider codex
 ```
@@ -58,6 +60,18 @@ are reported separately.
 Credentials are read into memory and are never stored by Agent Quota. Source
 code, repository contents, terminal history, and user prompts are not sent.
 
+Discover provider behavior without reading credentials or performing quota
+requests:
+
+```bash
+agent-quota capabilities
+agent-quota capabilities --json
+```
+
+The versioned JSON report exposes probe transport, credential and quota
+sources, message submission, possible billing/quota impact, and cache lifetime.
+See the [capabilities schema](docs/capabilities-schema-v1.md).
+
 ## Install
 
 ### Prebuilt binary
@@ -65,15 +79,15 @@ code, repository contents, terminal history, and user prompts are not sent.
 Download the archive for your operating system, extract `agent-quota` (or
 `agent-quota.exe`), and place it somewhere on your `PATH`.
 
-| Platform | v0.4.1 download |
+| Platform | v0.5.0 download |
 | --- | --- |
-| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-windows-x86_64.zip) |
-| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-linux-x86_64.tar.gz) |
-| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-macos-aarch64.tar.gz) |
-| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/agent-quota-macos-x86_64.tar.gz) |
+| Windows x86-64 | [ZIP](https://github.com/Halven08/agent-quota/releases/download/v0.5.0/agent-quota-windows-x86_64.zip) |
+| Linux x86-64 | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.5.0/agent-quota-linux-x86_64.tar.gz) |
+| macOS Apple silicon | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.5.0/agent-quota-macos-aarch64.tar.gz) |
+| macOS Intel | [tar.gz](https://github.com/Halven08/agent-quota/releases/download/v0.5.0/agent-quota-macos-x86_64.tar.gz) |
 
 Checksums are published in
-[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.4.1/SHA256SUMS).
+[`SHA256SUMS`](https://github.com/Halven08/agent-quota/releases/download/v0.5.0/SHA256SUMS).
 
 ### Build with Cargo
 
@@ -108,6 +122,9 @@ Verify setup without making quota requests:
 agent-quota doctor
 ```
 
+`doctor --json` emits a versioned report with an overall `ok` decision and
+`performsQuotaRequests: false`; diagnostics inspect only local prerequisites.
+
 ## CLI
 
 ```bash
@@ -119,6 +136,8 @@ agent-quota check --provider codex
 agent-quota check --config agent-quota.toml --require all
 agent-quota watch --interval 300
 agent-quota watch --json
+agent-quota capabilities --json
+agent-quota doctor --json
 agent-quota doctor --config agent-quota.toml
 agent-quota profiles list --config agent-quota.toml
 ```
@@ -126,18 +145,32 @@ agent-quota profiles list --config agent-quota.toml
 Example terminal output:
 
 ```text
-Provider/profile      Plan/account             Quota
---------------------  -----------------------  ----------------------------------------
-Codex                 Plus / you@example.com   5h window: 58% left, resets in 2h 8m
-Claude Work           Max                     EXHAUSTED — Weekly window: 0% left
+Quota usage
+===========
+Codex — Plus / you@example.com
+  5h window      [████████░░░░░░░░░░░░]  42% used ·  58% left
+                 resets in 2h 8m (2026-08-11T18:00:00+02:00)
+  Weekly window  [█████████░░░░░░░░░░░]  46% used ·  54% left
+                 resets in 5d 2h (2026-08-16T18:00:00+02:00)
+  Billable usage [███████░░░░░░░░░░░░░]  37% used ·  63% left
+                 7.50 used of 20.00 · resets in 5d 2h
+  Credits        12.50 available
+  Reset credits  2 available
+
+Claude Work — Max
+  EXHAUSTED
+  Weekly window  [████████████████████] 100% used ·   0% left
 ```
 
+Interactive human commands show a transient `Probing provider quotas…` spinner
+while live provider checks are running, then replace it with the result blocks.
 Reset times include a relative duration and an RFC 3339 timestamp in the local
 time zone. Watch intervals must be at least 60 seconds. Results are cached for
 five minutes, and completely failed checks are not cached.
 
 `watch --json` emits one compact JSON array per line (NDJSON). A one-shot status
-command emits pretty JSON.
+command emits pretty JSON. Successful cache-backed collections include optional
+`collection` metadata describing live/cached freshness and expiration.
 
 ### Readiness checks
 
@@ -147,9 +180,9 @@ gate. By default, it succeeds when **any** selected profile has both
 selected profile must be ready.
 
 The command prints the normal status output followed by a readiness summary.
-With `--json`, it emits the unchanged snapshot schema and communicates the
-decision through its exit code. Probe failure takes precedence over readiness:
-when every probe fails, the command returns `3` rather than `4`.
+With `--json`, it emits a versioned document containing both `snapshots` and a
+typed `readiness` summary. Probe failure takes precedence over readiness: when
+every probe fails, the command returns `3` rather than `4`.
 
 ### Exit codes
 
@@ -178,6 +211,15 @@ positive routing signal.
 
 `observedAtMs` uses Unix epoch milliseconds.
 `resetsAtEpochSeconds` uses Unix epoch seconds.
+
+The optional `collection` object reports `live` or `cached` freshness, original
+probe duration, and cache insertion/expiration timestamps. It does not change
+the `probeStatus`/`quotaState` decision.
+
+When a provider supplies them, `billableUsage`, `credits`, and
+`rateLimitResetCredits` report spend-controlled usage, the provider-formatted
+credit balance, and the number of available rate-limit reset credits. An
+exhausted billable limit is not a safe positive routing signal.
 
 See the [schema notes](docs/snapshot-schema-v1.md) and the
 [canonical JSON fixture](crates/agent-quota-core/fixtures/provider-usage-v1.json).
@@ -228,16 +270,21 @@ exact `0.x` version:
 
 ```toml
 [dependencies]
-agent-quota-core = "=0.4.1"
+agent-quota-core = "=0.5.0"
 ```
 
 ```rust,no_run
-use agent_quota_core::{AgentQuotaClient, CollectUsageOptions};
+use agent_quota_core::{
+    AgentQuotaClient, CollectUsageOptions, ReadinessPolicy, ReadinessSummary,
+};
 
 # async fn example() {
 let snapshots = AgentQuotaClient::new()
     .collect_usage(CollectUsageOptions::all())
     .await;
+
+let readiness = ReadinessSummary::evaluate(&snapshots, ReadinessPolicy::All);
+println!("ready: {}", readiness.satisfied);
 
 for snapshot in snapshots {
     println!("{}: {}", snapshot.profile_name, snapshot.is_ready());

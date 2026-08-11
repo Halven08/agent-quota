@@ -3,6 +3,36 @@
 All notable changes are documented here. The project follows semantic
 versioning conventions appropriate for a pre-1.0 Rust crate.
 
+## v0.5.0 - 2026-08-11
+
+### Added
+
+- Add `agent-quota capabilities` with versioned human and JSON provider
+  discovery, including probe transport, credential source, message submission,
+  billing/quota impact, and default cache lifetime.
+- Add versioned JSON documents for `doctor --json` and `check --json`.
+- Add `ReadinessPolicy` and `ReadinessSummary` to the core library for typed
+  `any`/`all` evaluation with ready, failed, and exhausted profile counts.
+- Add optional `collection` metadata to snapshot schema v1 with live/cached
+  freshness, original probe duration, and cache insertion/expiration times.
+- Add optional billable usage, provider credit balance, and available
+  rate-limit reset-credit fields to snapshot schema v1.
+- Add internal provider adapter modules and contract tests so new providers can
+  be introduced behind a consistent boundary.
+
+### Changed
+
+- Redesign human quota output with an interactive probe spinner, proportional
+  usage bars, explicit used and remaining percentages, and one readable block
+  per provider profile. JSON and redirected output remain animation-free.
+- Treat an exhausted provider spend control as exhausted quota for readiness.
+- Source doctor impact text from the same capability contract exposed to
+  integrations.
+- Make `check --json` return snapshots together with the evaluated readiness
+  summary instead of requiring callers to infer the decision from the exit code.
+- Bump `agent-quota-core` and the CLI to `0.5.0` while preserving snapshot
+  schema v1 and all established exit-code meanings.
+
 ## v0.4.1 - 2026-08-11
 
 ### Added

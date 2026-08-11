@@ -1,22 +1,61 @@
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agent_quota_core::{
-    default_claude_credentials_path, AgentQuotaClient, AgentQuotaConfig, CollectUsageOptions,
-    ProbeStatus, ProviderId, ProviderProfile, ProviderUsageCache, ProviderUsageSnapshot,
-    QuotaState,
+    default_claude_credentials_path, provider_capabilities, provider_capability, AgentQuotaClient,
+    AgentQuotaConfig, CollectUsageOptions, ProbeStatus, ProviderCapabilitiesDocument,
+    ProviderCredits, ProviderId, ProviderProbeTransport, ProviderProfile, ProviderUsageCache,
+    ProviderUsageSnapshot, QuotaState, ReadinessPolicy, ReadinessSummary,
 };
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 const DEFAULT_INTERVAL_SECONDS: u64 = 300;
 const MINIMUM_INTERVAL_SECONDS: u64 = 60;
 const ALL_PROBES_FAILED_EXIT_CODE: i32 = 3;
 const READINESS_NOT_SATISFIED_EXIT_CODE: i32 = 4;
+const PROBE_INDICATOR_CLEAR_WIDTH: usize = 64;
+
+struct ProbeIndicator {
+    task: Option<JoinHandle<()>>,
+}
+
+impl ProbeIndicator {
+    fn start(enabled: bool) -> Self {
+        if !enabled || !io::stderr().is_terminal() {
+            return Self { task: None };
+        }
+
+        eprint!("\r⠋ Probing provider quotas…");
+        let _ = io::stderr().flush();
+        let task = tokio::spawn(async {
+            let frames = ["⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", "⠋"];
+            let mut frame = 0;
+            loop {
+                sleep(Duration::from_millis(80)).await;
+                eprint!("\r{} Probing provider quotas…", frames[frame]);
+                let _ = io::stderr().flush();
+                frame = (frame + 1) % frames.len();
+            }
+        });
+        Self { task: Some(task) }
+    }
+
+    async fn finish(mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+            eprint!("\r{:<width$}\r", "", width = PROBE_INDICATOR_CLEAR_WIDTH);
+            let _ = io::stderr().flush();
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct CliOptions {
@@ -38,14 +77,9 @@ enum CliCommand {
     Check,
     ProfilesList,
     Doctor,
+    Capabilities,
     Help,
     Version,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadinessPolicy {
-    Any,
-    All,
 }
 
 impl Default for CliOptions {
@@ -75,6 +109,25 @@ struct DoctorCheck {
     provider_impact: String,
 }
 
+const DOCTOR_SCHEMA_VERSION: u32 = 1;
+const CHECK_REPORT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DoctorReport<'a> {
+    schema_version: u32,
+    ok: bool,
+    performs_quota_requests: bool,
+    checks: &'a [DoctorCheck],
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckReport<'a> {
+    schema_version: u32,
+    snapshots: &'a [ProviderUsageSnapshot],
+    readiness: ReadinessSummary,
+}
 #[tokio::main]
 async fn main() {
     let options = match parse_args(std::env::args().skip(1).collect()) {
@@ -98,6 +151,7 @@ async fn main() {
     match options.command {
         CliCommand::ProfilesList => run_profiles_list(&options),
         CliCommand::Doctor => run_doctor(&options).await,
+        CliCommand::Capabilities => run_capabilities(&options),
         CliCommand::Status | CliCommand::Check => run_status(&options).await,
         CliCommand::Help | CliCommand::Version => unreachable!("handled above"),
     }
@@ -115,9 +169,18 @@ async fn run_status(options: &CliOptions) {
     let cache = ProviderUsageCache::default();
 
     loop {
+        let indicator = ProbeIndicator::start(!options.json);
         let snapshots = cache.collect(&client, collect_options.clone(), false).await;
+        indicator.finish().await;
+        let readiness = ReadinessSummary::evaluate(&snapshots, options.readiness_policy);
         if options.json {
-            let serialized = if options.watch {
+            let serialized = if options.command == CliCommand::Check {
+                serde_json::to_string_pretty(&CheckReport {
+                    schema_version: CHECK_REPORT_SCHEMA_VERSION,
+                    snapshots: &snapshots,
+                    readiness: readiness.clone(),
+                })
+            } else if options.watch {
                 serde_json::to_string(&snapshots)
             } else {
                 serde_json::to_string_pretty(&snapshots)
@@ -132,13 +195,12 @@ async fn run_status(options: &CliOptions) {
         } else {
             print_table(&snapshots);
             if options.command == CliCommand::Check {
-                print_readiness_summary(&snapshots, options.readiness_policy);
+                print_readiness_summary(&readiness);
             }
         }
 
         if !options.watch {
-            let exit_code =
-                snapshot_exit_code(options.command, options.readiness_policy, &snapshots);
+            let exit_code = snapshot_exit_code(options.command, &snapshots, &readiness);
             if exit_code != 0 {
                 process::exit(exit_code);
             }
@@ -148,19 +210,10 @@ async fn run_status(options: &CliOptions) {
     }
 }
 
-fn readiness_satisfied(snapshots: &[ProviderUsageSnapshot], policy: ReadinessPolicy) -> bool {
-    match policy {
-        ReadinessPolicy::Any => snapshots.iter().any(ProviderUsageSnapshot::is_ready),
-        ReadinessPolicy::All => {
-            !snapshots.is_empty() && snapshots.iter().all(ProviderUsageSnapshot::is_ready)
-        }
-    }
-}
-
 fn snapshot_exit_code(
     command: CliCommand,
-    policy: ReadinessPolicy,
     snapshots: &[ProviderUsageSnapshot],
+    readiness: &ReadinessSummary,
 ) -> i32 {
     if !snapshots.is_empty()
         && snapshots
@@ -168,31 +221,77 @@ fn snapshot_exit_code(
             .all(|snapshot| snapshot.probe_status != ProbeStatus::Ok)
     {
         ALL_PROBES_FAILED_EXIT_CODE
-    } else if command == CliCommand::Check && !readiness_satisfied(snapshots, policy) {
+    } else if command == CliCommand::Check && !readiness.satisfied {
         READINESS_NOT_SATISFIED_EXIT_CODE
     } else {
         0
     }
 }
 
-fn print_readiness_summary(snapshots: &[ProviderUsageSnapshot], policy: ReadinessPolicy) {
-    let ready_count = snapshots
-        .iter()
-        .filter(|snapshot| snapshot.is_ready())
-        .count();
-    let ready = readiness_satisfied(snapshots, policy);
-    let policy_label = match policy {
+fn print_readiness_summary(readiness: &ReadinessSummary) {
+    let policy_label = match readiness.policy {
         ReadinessPolicy::Any => "any",
         ReadinessPolicy::All => "all",
     };
     println!();
     println!(
-        "Readiness: {} ({ready_count} of {} profiles ready; policy: {policy_label})",
-        if ready { "READY" } else { "NOT READY" },
-        snapshots.len()
+        "Readiness: {} ({} of {} profiles ready; policy: {policy_label})",
+        if readiness.satisfied {
+            "READY"
+        } else {
+            "NOT READY"
+        },
+        readiness.ready_profiles,
+        readiness.total_profiles
     );
 }
 
+fn run_capabilities(options: &CliOptions) {
+    let capabilities = provider_capabilities();
+    if options.json {
+        match serde_json::to_string_pretty(&capabilities) {
+            Ok(output) => println!("{output}"),
+            Err(error) => {
+                eprintln!("error: failed to serialize provider capabilities: {error}");
+                process::exit(1);
+            }
+        }
+    } else {
+        print_capabilities(&capabilities);
+    }
+}
+
+fn print_capabilities(capabilities: &ProviderCapabilitiesDocument) {
+    println!(
+        "Agent Quota capabilities (schema {}, snapshot schema {})",
+        capabilities.schema_version, capabilities.snapshot_schema_version
+    );
+    println!();
+    println!("Provider      Transport      Sends message  May affect quota/billing");
+    println!("------------  -------------  -------------  ------------------------");
+    for capability in &capabilities.providers {
+        let transport = match capability.probe_transport {
+            ProviderProbeTransport::LocalProcess => "local process",
+            ProviderProbeTransport::RemoteApi => "remote API",
+        };
+        println!(
+            "{:<12}  {:<13}  {:<13}  {}",
+            capability.provider_name,
+            transport,
+            if capability.submits_message {
+                "yes"
+            } else {
+                "no"
+            },
+            if capability.may_affect_quota_or_billing {
+                "yes"
+            } else {
+                "no"
+            }
+        );
+        println!("  {}", capability.probe_impact);
+    }
+}
 fn run_profiles_list(options: &CliOptions) {
     let profiles = match load_profiles(options, true) {
         Ok(profiles) => profiles,
@@ -223,9 +322,16 @@ async fn run_doctor(options: &CliOptions) {
         }
     };
     let checks = futures::future::join_all(profiles.iter().map(diagnose_profile)).await;
+    let ok = checks.iter().all(|check| check.ok);
 
     if options.json {
-        match serde_json::to_string_pretty(&checks) {
+        let report = DoctorReport {
+            schema_version: DOCTOR_SCHEMA_VERSION,
+            ok,
+            performs_quota_requests: false,
+            checks: &checks,
+        };
+        match serde_json::to_string_pretty(&report) {
             Ok(output) => println!("{output}"),
             Err(error) => {
                 eprintln!("error: failed to serialize diagnostics: {error}");
@@ -249,7 +355,7 @@ async fn run_doctor(options: &CliOptions) {
         println!("Doctor does not perform quota requests or send provider API messages.");
     }
 
-    if checks.iter().any(|check| !check.ok) {
+    if !ok {
         process::exit(1);
     }
 }
@@ -301,9 +407,7 @@ async fn diagnose_profile(profile: &ProviderProfile) -> DoctorCheck {
                 provider: profile.provider,
                 ok,
                 detail,
-                provider_impact:
-                    "Quota checks start the local Codex app-server and do not submit a prompt."
-                        .to_owned(),
+                provider_impact: provider_capability(profile.provider).probe_impact,
             }
         }
         ProviderId::Claude => {
@@ -334,7 +438,7 @@ async fn diagnose_profile(profile: &ProviderProfile) -> DoctorCheck {
                 provider: profile.provider,
                 ok,
                 detail,
-                provider_impact: "Quota checks send a fixed one-token `hi` message to Anthropic; results are cached for five minutes.".to_owned(),
+                provider_impact: provider_capability(profile.provider).probe_impact,
             }
         }
     }
@@ -371,6 +475,10 @@ fn parse_args(args: Vec<String>) -> Result<CliOptions, String> {
         }
         Some("doctor") => {
             options.command = CliCommand::Doctor;
+            index = 1;
+        }
+        Some("capabilities") => {
+            options.command = CliCommand::Capabilities;
             index = 1;
         }
         Some("profiles") => {
@@ -487,6 +595,16 @@ fn validate_options(options: &CliOptions) -> Result<(), String> {
     if options.command == CliCommand::Doctor && options.watch {
         return Err("doctor does not support --watch".to_owned());
     }
+    if options.command == CliCommand::Capabilities
+        && (options.watch
+            || !options.providers.is_empty()
+            || !options.profiles.is_empty()
+            || options.config_path.is_some())
+    {
+        return Err(
+            "capabilities does not support provider, profile, config, or watch options".to_owned(),
+        );
+    }
     Ok(())
 }
 
@@ -578,6 +696,7 @@ fn print_usage(stderr: bool) {
         "  agent-quota check [--require any|all] [--json] [filters]",
         "  agent-quota watch [--json] [--interval <seconds>] [filters]",
         "  agent-quota doctor [--json] [--config <path>] [filters]",
+        "  agent-quota capabilities [--json]",
         "  agent-quota profiles list --config <path> [--json]",
         "  agent-quota --version",
         "",
@@ -619,16 +738,17 @@ fn print_profiles(profiles: &[ProviderProfile]) {
 }
 
 fn print_table(snapshots: &[ProviderUsageSnapshot]) {
-    println!("Provider/profile      Plan/account             Quota");
-    println!(
-        "--------------------  -----------------------  ----------------------------------------"
-    );
+    println!("Quota usage");
+    println!("===========");
     if snapshots.is_empty() {
         println!("No provider profiles selected.");
         return;
     }
 
-    for snapshot in snapshots {
+    for (index, snapshot) in snapshots.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
         let account = match (&snapshot.plan, &snapshot.account_label) {
             (Some(plan), Some(account)) => format!("{plan} / {account}"),
             (Some(plan), None) => plan.clone(),
@@ -636,46 +756,97 @@ fn print_table(snapshots: &[ProviderUsageSnapshot]) {
             (None, None) if snapshot.probe_status == ProbeStatus::Ok => "Signed in".to_owned(),
             (None, None) => "Unavailable".to_owned(),
         };
-        let usage = if let Some(error) = &snapshot.error {
-            format!(
-                "{}: {}",
-                probe_status_label(snapshot.probe_status),
-                error.message
-            )
-        } else if snapshot.windows.is_empty() {
-            snapshot
-                .message
-                .clone()
-                .unwrap_or_else(|| "Quota state unknown".to_owned())
+        println!("{} — {account}", snapshot.profile_name);
+
+        if let Some(error) = &snapshot.error {
+            println!("  {}", probe_status_label(snapshot.probe_status));
+            println!("  {}", error.message);
         } else {
-            let windows = snapshot
-                .windows
-                .iter()
-                .map(|window| {
-                    let remaining = window
-                        .remaining_percent
-                        .map(|value| format!("{value:.0}% left"))
-                        .unwrap_or_else(|| "remaining unknown".to_owned());
-                    match window.resets_at_epoch_seconds {
-                        Some(reset) => {
-                            format!(
-                                "{}: {remaining}, resets {}",
-                                window.label,
-                                format_reset(reset)
-                            )
-                        }
-                        None => format!("{}: {remaining}", window.label),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" / ");
             if snapshot.quota_state == QuotaState::Exhausted {
-                format!("EXHAUSTED — {windows}")
-            } else {
-                windows
+                println!("  EXHAUSTED");
             }
-        };
-        println!("{:<20}  {:<23}  {usage}", snapshot.profile_name, account);
+            if snapshot.windows.is_empty() {
+                println!(
+                    "  {}",
+                    snapshot.message.as_deref().unwrap_or("Quota state unknown")
+                );
+            } else {
+                for window in &snapshot.windows {
+                    println!(
+                        "  {:<14} {}",
+                        window.label,
+                        format_usage_bar(window.used_percent, window.remaining_percent)
+                    );
+                    if let Some(reset) = window.resets_at_epoch_seconds {
+                        println!("  {:<14} resets {}", "", format_reset(reset));
+                    }
+                }
+            }
+            if let Some(billable) = &snapshot.billable_usage {
+                println!(
+                    "  {:<14} {}",
+                    "Billable usage",
+                    format_usage_bar(None, Some(billable.remaining_percent))
+                );
+                println!(
+                    "  {:<14} {} used of {} · resets {}",
+                    "",
+                    billable.used,
+                    billable.limit,
+                    format_reset(billable.resets_at_epoch_seconds)
+                );
+            }
+            if let Some(credits) = &snapshot.credits {
+                println!("  {:<14} {}", "Credits", format_credit_balance(credits));
+            }
+            if let Some(reset_credits) = &snapshot.rate_limit_reset_credits {
+                println!(
+                    "  {:<14} {} available",
+                    "Reset credits", reset_credits.available_count
+                );
+            }
+        }
+    }
+}
+
+const USAGE_BAR_WIDTH: usize = 20;
+
+fn format_usage_bar(used_percent: Option<f64>, remaining_percent: Option<f64>) -> String {
+    let used = used_percent
+        .filter(|value| value.is_finite())
+        .or_else(|| {
+            remaining_percent
+                .filter(|value| value.is_finite())
+                .map(|value| 100.0 - value)
+        })
+        .map(|value| value.clamp(0.0, 100.0));
+    let Some(used) = used else {
+        return format!("[{}] usage unknown", "?".repeat(USAGE_BAR_WIDTH));
+    };
+    let remaining = remaining_percent
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 100.0))
+        .unwrap_or(100.0 - used);
+    let filled = ((used / 100.0) * USAGE_BAR_WIDTH as f64).round() as usize;
+    format!(
+        "[{}{}] {:>3.0}% used · {:>3.0}% left",
+        "█".repeat(filled),
+        "░".repeat(USAGE_BAR_WIDTH.saturating_sub(filled)),
+        used,
+        remaining
+    )
+}
+fn format_credit_balance(credits: &ProviderCredits) -> String {
+    if credits.unlimited {
+        "unlimited".to_owned()
+    } else if credits.has_credits {
+        credits
+            .balance
+            .as_deref()
+            .map(|balance| format!("{balance} available"))
+            .unwrap_or_else(|| "available".to_owned())
+    } else {
+        "none available".to_owned()
     }
 }
 
@@ -764,6 +935,9 @@ mod tests {
         let doctor =
             parse_args(vec!["doctor".to_owned(), "--json".to_owned()]).expect("doctor parses");
         assert_eq!(doctor.command, CliCommand::Doctor);
+        let capabilities = parse_args(vec!["capabilities".to_owned(), "--json".to_owned()])
+            .expect("capabilities parse");
+        assert_eq!(capabilities.command, CliCommand::Capabilities);
         let help = parse_args(vec!["--help".to_owned()]).expect("help parses");
         assert_eq!(help.command, CliCommand::Help);
         let check = parse_args(vec![
@@ -844,7 +1018,11 @@ mod tests {
             quota_state,
             plan: None,
             windows: Vec::new(),
+            billable_usage: None,
+            credits: None,
+            rate_limit_reset_credits: None,
             observed_at_ms: 0,
+            collection: None,
             message: None,
             error: None,
         }
@@ -856,28 +1034,72 @@ mod tests {
         let exhausted = snapshot(ProbeStatus::Ok, QuotaState::Exhausted);
         let failed = snapshot(ProbeStatus::TransientError, QuotaState::Unknown);
 
-        assert!(readiness_satisfied(
-            &[ready.clone(), exhausted.clone()],
-            ReadinessPolicy::Any
-        ));
-        assert!(!readiness_satisfied(
-            &[ready.clone(), exhausted.clone()],
-            ReadinessPolicy::All
-        ));
-        assert!(readiness_satisfied(&[ready.clone()], ReadinessPolicy::All));
-        assert!(!readiness_satisfied(&[], ReadinessPolicy::Any));
+        let any =
+            ReadinessSummary::evaluate(&[ready.clone(), exhausted.clone()], ReadinessPolicy::Any);
+        assert!(any.satisfied);
+        assert_eq!(any.ready_profiles, 1);
+        assert_eq!(any.exhausted_profiles, 1);
 
+        let all =
+            ReadinessSummary::evaluate(&[ready.clone(), exhausted.clone()], ReadinessPolicy::All);
+        assert!(!all.satisfied);
+        assert!(ReadinessSummary::evaluate(&[ready.clone()], ReadinessPolicy::All).satisfied);
+        assert!(!ReadinessSummary::evaluate(&[], ReadinessPolicy::Any).satisfied);
+
+        assert_eq!(snapshot_exit_code(CliCommand::Check, &[ready], &any), 0);
+        let exhausted_summary =
+            ReadinessSummary::evaluate(&[exhausted.clone()], ReadinessPolicy::Any);
         assert_eq!(
-            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[ready]),
-            0
-        );
-        assert_eq!(
-            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[exhausted]),
+            snapshot_exit_code(CliCommand::Check, &[exhausted], &exhausted_summary),
             READINESS_NOT_SATISFIED_EXIT_CODE
         );
+        let failed_summary = ReadinessSummary::evaluate(&[failed.clone()], ReadinessPolicy::Any);
         assert_eq!(
-            snapshot_exit_code(CliCommand::Check, ReadinessPolicy::Any, &[failed]),
+            snapshot_exit_code(CliCommand::Check, &[failed], &failed_summary),
             ALL_PROBES_FAILED_EXIT_CODE
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_probe_indicator_is_silent() {
+        let indicator = ProbeIndicator::start(false);
+        assert!(indicator.task.is_none());
+        indicator.finish().await;
+    }
+
+    #[test]
+    fn formats_quota_usage_bars() {
+        assert_eq!(
+            format_usage_bar(Some(0.0), Some(100.0)),
+            "[░░░░░░░░░░░░░░░░░░░░]   0% used · 100% left"
+        );
+        assert_eq!(
+            format_usage_bar(Some(42.0), Some(58.0)),
+            "[████████░░░░░░░░░░░░]  42% used ·  58% left"
+        );
+        assert_eq!(
+            format_usage_bar(None, Some(25.0)),
+            "[███████████████░░░░░]  75% used ·  25% left"
+        );
+        assert_eq!(
+            format_usage_bar(None, None),
+            "[????????????????????] usage unknown"
+        );
+        assert_eq!(
+            format_credit_balance(&ProviderCredits {
+                balance: Some("12.50".to_owned()),
+                has_credits: true,
+                unlimited: false,
+            }),
+            "12.50 available"
+        );
+        assert_eq!(
+            format_credit_balance(&ProviderCredits {
+                balance: None,
+                has_credits: false,
+                unlimited: true,
+            }),
+            "unlimited"
         );
     }
 
