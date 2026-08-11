@@ -18,6 +18,39 @@ Agent Quota and downstream consumers can use this file as a contract fixture.
 
 - `observedAtMs` is Unix epoch milliseconds.
 - `resetsAtEpochSeconds` is Unix epoch seconds.
+- `collection.cachedAtMs` and `collection.expiresAtMs` are Unix epoch
+  milliseconds.
+- `collection.probeDurationMs` is a duration in milliseconds.
+- `billableUsage.resetsAtEpochSeconds` is Unix epoch seconds.
+
+## Billable usage and credits
+
+The optional `billableUsage` object contains provider-formatted `used` and
+`limit` amounts, a normalized `remainingPercent`, and its reset time. Agent
+Quota deliberately preserves amount strings because providers may use different
+currencies or units. A zero remaining percentage or an explicit provider spend
+control signal makes `quotaState` exhausted.
+
+The optional `credits` object reports `hasCredits`, `unlimited`, and a
+provider-formatted `balance` when supplied. The optional
+`rateLimitResetCredits.availableCount` is a separate count of credits that can
+reset a provider rate limit; it is not a monetary balance. Agent Quota reads
+these fields but never redeems a reset credit or initiates a purchase.
+
+## Collection metadata
+
+The optional `collection` object describes how Agent Quota obtained this copy
+of a snapshot without changing the provider quota decision:
+
+- `freshness` is `live` when the collection call probed the provider and
+  `cached` when it reused a successful profile result.
+- `probeDurationMs` measures the original provider probe, including on cached
+  copies.
+- `cachedAtMs` and `expiresAtMs` are present when a result participates in a
+  `ProviderUsageCache`.
+
+Consumers written before v0.5.0 can ignore this optional object. Use
+`observedAtMs`, not the cache timestamps, as the provider observation time.
 
 ## Compatibility
 

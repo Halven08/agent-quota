@@ -6,10 +6,12 @@
 //! snapshot. A successful probe and usable quota are represented separately so
 //! consumers do not need to infer routing decisions from transport health.
 
+mod providers;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{fs, process::Stdio};
 
 use reqwest::header::HeaderMap;
@@ -24,7 +26,9 @@ use tokio::time::timeout;
 
 const DEFAULT_CODEX_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+/// Default lifetime of a successful cached provider snapshot.
+pub const DEFAULT_CACHE_TTL_SECONDS: u64 = 5 * 60;
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(DEFAULT_CACHE_TTL_SECONDS);
 const CLAUDE_USAGE_MODEL: &str = "claude-haiku-4-5-20251001";
 const CLAUDE_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_CREDENTIALS_RELATIVE_PATH: &str = ".claude/.credentials.json";
@@ -34,6 +38,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Current serialized snapshot schema.
 pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// Current serialized provider-capabilities schema.
+pub const CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 
 /// Result type used for configuration operations.
 pub type AgentQuotaResult<T> = Result<T, AgentQuotaError>;
@@ -126,6 +132,88 @@ impl ProviderId {
     }
 }
 
+/// Transport used by a provider quota probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProbeTransport {
+    /// A local provider process exposes the quota interface.
+    LocalProcess,
+    /// Agent Quota calls a remote provider API directly.
+    RemoteApi,
+}
+
+/// Machine-readable source of normalized quota data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderQuotaSource {
+    /// Codex app-server account and rate-limit RPC methods.
+    CodexAppServer,
+    /// Anthropic rate-limit response headers.
+    AnthropicRateLimitHeaders,
+}
+
+/// Local credential source required by a provider probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCredentialSource {
+    /// The signed-in Codex CLI session.
+    CodexCliSession,
+    /// The Claude Code OAuth credential file.
+    ClaudeCodeOauthFile,
+}
+
+/// Stable capability description for one supported provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapability {
+    /// Stable provider identifier.
+    pub provider_id: ProviderId,
+    /// Human-readable provider name.
+    pub provider_name: String,
+    /// Transport used to obtain quota data.
+    pub probe_transport: ProviderProbeTransport,
+    /// Machine-readable quota source.
+    pub quota_source: ProviderQuotaSource,
+    /// Local credential source read by the probe.
+    pub credential_source: ProviderCredentialSource,
+    /// Whether a quota probe submits a message to the provider.
+    pub submits_message: bool,
+    /// Whether a quota probe may affect provider quota or billing.
+    pub may_affect_quota_or_billing: bool,
+    /// Default successful-result cache lifetime.
+    pub default_cache_ttl_seconds: u64,
+    /// Concise human-readable probe impact.
+    pub probe_impact: String,
+}
+
+/// Versioned capability document for discovery by tools and user interfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCapabilitiesDocument {
+    /// Capability document schema version.
+    pub schema_version: u32,
+    /// Snapshot schema produced by this Agent Quota version.
+    pub snapshot_schema_version: u32,
+    /// Capabilities for every supported provider.
+    pub providers: Vec<ProviderCapability>,
+}
+
+/// Return the stable capability description for one provider.
+pub fn provider_capability(provider: ProviderId) -> ProviderCapability {
+    providers::adapter(provider).capability()
+}
+
+/// Return a versioned document describing every supported provider.
+pub fn provider_capabilities() -> ProviderCapabilitiesDocument {
+    ProviderCapabilitiesDocument {
+        schema_version: CAPABILITIES_SCHEMA_VERSION,
+        snapshot_schema_version: SNAPSHOT_SCHEMA_VERSION,
+        providers: vec![
+            provider_capability(ProviderId::Codex),
+            provider_capability(ProviderId::Claude),
+        ],
+    }
+}
 /// One locally configured provider account.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -375,6 +463,70 @@ pub enum QuotaState {
     Unknown,
 }
 
+/// Policy used to evaluate whether selected profiles permit more work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessPolicy {
+    /// At least one selected profile must be ready.
+    Any,
+    /// Every selected profile must be ready.
+    All,
+}
+
+/// Typed result of evaluating readiness across provider snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadinessSummary {
+    /// Policy used for this evaluation.
+    pub policy: ReadinessPolicy,
+    /// Whether the selected policy is satisfied.
+    pub satisfied: bool,
+    /// Total number of evaluated profiles.
+    pub total_profiles: usize,
+    /// Profiles with a successful probe and available quota.
+    pub ready_profiles: usize,
+    /// Profiles that are not safe positive routing signals.
+    pub not_ready_profiles: usize,
+    /// Profiles whose provider probe did not complete successfully.
+    pub failed_probes: usize,
+    /// Profiles that successfully reported exhausted quota.
+    pub exhausted_profiles: usize,
+}
+
+impl ReadinessSummary {
+    /// Evaluate provider snapshots under an `any` or `all` readiness policy.
+    pub fn evaluate(snapshots: &[ProviderUsageSnapshot], policy: ReadinessPolicy) -> Self {
+        let total_profiles = snapshots.len();
+        let ready_profiles = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.is_ready())
+            .count();
+        let failed_probes = snapshots
+            .iter()
+            .filter(|snapshot| snapshot.probe_status != ProbeStatus::Ok)
+            .count();
+        let exhausted_profiles = snapshots
+            .iter()
+            .filter(|snapshot| {
+                snapshot.probe_status == ProbeStatus::Ok
+                    && snapshot.quota_state == QuotaState::Exhausted
+            })
+            .count();
+        let satisfied = match policy {
+            ReadinessPolicy::Any => ready_profiles > 0,
+            ReadinessPolicy::All => total_profiles > 0 && ready_profiles == total_profiles,
+        };
+        Self {
+            policy,
+            satisfied,
+            total_profiles,
+            ready_profiles,
+            not_ready_profiles: total_profiles.saturating_sub(ready_profiles),
+            failed_probes,
+            exhausted_profiles,
+        }
+    }
+}
 /// Stable machine-readable failure category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -411,6 +563,64 @@ pub struct ProviderUsageError {
     pub retryable: bool,
 }
 
+/// Whether a returned snapshot came from a live probe or a cache hit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderUsageFreshness {
+    /// The provider was probed for this collection call.
+    Live,
+    /// A successful snapshot was returned from the profile cache.
+    Cached,
+}
+
+/// Optional collection metadata that does not change provider quota semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderUsageCollectionMetadata {
+    /// Whether this call performed a live probe or returned a cached snapshot.
+    pub freshness: ProviderUsageFreshness,
+    /// Time spent performing the original provider probe.
+    pub probe_duration_ms: u64,
+    /// Time at which a successful result entered the cache, when applicable.
+    pub cached_at_ms: Option<i64>,
+    /// Time at which the cached result expires, when applicable.
+    pub expires_at_ms: Option<i64>,
+}
+
+/// Optional billable or spend-controlled usage reported by a provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderBillableUsage {
+    /// Provider-formatted amount consumed in the current billing window.
+    pub used: String,
+    /// Provider-formatted limit for the current billing window.
+    pub limit: String,
+    /// Remaining billable capacity from zero to one hundred.
+    pub remaining_percent: f64,
+    /// Billing-window reset time in Unix epoch seconds.
+    pub resets_at_epoch_seconds: i64,
+}
+
+/// Optional provider credit balance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderCredits {
+    /// Provider-formatted balance, when supplied.
+    pub balance: Option<String>,
+    /// Whether the provider reports a usable credit balance.
+    pub has_credits: bool,
+    /// Whether provider credits are unlimited.
+    pub unlimited: bool,
+}
+
+/// Optional summary of credits that can reset a provider rate limit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderRateLimitResetCredits {
+    /// Number of reset credits currently available.
+    pub available_count: u64,
+}
+
 /// Normalized provider quota snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -437,8 +647,20 @@ pub struct ProviderUsageSnapshot {
     pub plan: Option<String>,
     /// Normalized quota windows.
     pub windows: Vec<ProviderUsageWindow>,
+    /// Optional billable or spend-controlled usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billable_usage: Option<ProviderBillableUsage>,
+    /// Optional provider credit balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<ProviderCredits>,
+    /// Optional available rate-limit reset credits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_reset_credits: Option<ProviderRateLimitResetCredits>,
     /// Observation time in Unix epoch milliseconds.
     pub observed_at_ms: i64,
+    /// Optional live-probe and cache freshness metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<ProviderUsageCollectionMetadata>,
     /// Optional informational note.
     pub message: Option<String>,
     /// Structured error when the probe did not succeed.
@@ -489,7 +711,7 @@ pub enum ProviderUsageWindowKind {
 }
 
 #[derive(Debug, Clone)]
-struct ProbeFailure {
+pub(crate) struct ProbeFailure {
     error: ProviderUsageError,
 }
 
@@ -594,25 +816,32 @@ impl AgentQuotaClient {
 
     /// Collect one configured profile.
     pub async fn collect_profile_usage(&self, profile: ProviderProfile) -> ProviderUsageSnapshot {
-        if let Err(error) = profile.validate() {
-            return failed_snapshot(
+        let started = Instant::now();
+        let mut snapshot = if let Err(error) = profile.validate() {
+            failed_snapshot(
                 &profile,
                 ProbeFailure::new(
                     ProviderUsageErrorCode::InvalidConfiguration,
                     error.to_string(),
                     false,
                 ),
-            );
-        }
-
-        let result = match profile.provider {
-            ProviderId::Codex => self.query_codex_usage(&profile).await,
-            ProviderId::Claude => self.query_claude_usage(&profile).await,
+            )
+        } else {
+            let result = providers::adapter(profile.provider)
+                .collect(self, &profile)
+                .await;
+            result.unwrap_or_else(|error| failed_snapshot(&profile, error))
         };
-        result.unwrap_or_else(|error| failed_snapshot(&profile, error))
+        snapshot.collection = Some(ProviderUsageCollectionMetadata {
+            freshness: ProviderUsageFreshness::Live,
+            probe_duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            cached_at_ms: None,
+            expires_at_ms: None,
+        });
+        snapshot
     }
 
-    async fn query_codex_usage(
+    pub(crate) async fn query_codex_usage(
         &self,
         profile: &ProviderProfile,
     ) -> Result<ProviderUsageSnapshot, ProbeFailure> {
@@ -739,7 +968,7 @@ impl AgentQuotaClient {
         codex_snapshot_from_responses(profile, &responses.0, &responses.1)
     }
 
-    async fn query_claude_usage(
+    pub(crate) async fn query_claude_usage(
         &self,
         profile: &ProviderProfile,
     ) -> Result<ProviderUsageSnapshot, ProbeFailure> {
@@ -899,24 +1128,71 @@ fn codex_snapshot_from_responses(
         ));
     }
 
+    let billable_usage = codex_billable_usage(rate_limits);
+    let credits = codex_credits(rate_limits);
+    let rate_limit_reset_credits = rate_limits_response
+        .pointer("/result/rateLimitResetCredits/availableCount")
+        .and_then(integer_value)
+        .and_then(|value| u64::try_from(value).ok())
+        .map(|available_count| ProviderRateLimitResetCredits { available_count });
     let reached = rate_limits
         .get("rateLimitReachedType")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty());
-    let quota_state = if reached.is_some() {
+    let spend_control_reached = rate_limits
+        .get("spendControlReached")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || billable_usage
+            .as_ref()
+            .is_some_and(|usage| usage.remaining_percent <= 0.0);
+    let quota_state = if reached.is_some() || spend_control_reached {
         QuotaState::Exhausted
     } else {
         quota_state_from_windows(&windows)
     };
-    Ok(success_snapshot(
+    let message = reached
+        .map(|value| format!("Limit reached: {}", value.replace('_', " ")))
+        .or_else(|| spend_control_reached.then(|| "Billable usage limit reached".to_owned()));
+    let mut snapshot = success_snapshot(
         profile,
         account_label,
         Some("codex_app_server"),
         plan,
         windows,
-        reached.map(|value| format!("Limit reached: {}", value.replace('_', " "))),
+        message,
         quota_state,
-    ))
+    );
+    snapshot.billable_usage = billable_usage;
+    snapshot.credits = credits;
+    snapshot.rate_limit_reset_credits = rate_limit_reset_credits;
+    Ok(snapshot)
+}
+
+fn codex_billable_usage(rate_limits: &Value) -> Option<ProviderBillableUsage> {
+    let value = rate_limits.get("individualLimit")?.as_object()?;
+    Some(ProviderBillableUsage {
+        used: scalar_string(value.get("used")?)?,
+        limit: scalar_string(value.get("limit")?)?,
+        remaining_percent: number_value(value.get("remainingPercent")?)?.clamp(0.0, 100.0),
+        resets_at_epoch_seconds: normalize_epoch_seconds(integer_value(value.get("resetsAt")?)?),
+    })
+}
+
+fn codex_credits(rate_limits: &Value) -> Option<ProviderCredits> {
+    let value = rate_limits.get("credits")?.as_object()?;
+    Some(ProviderCredits {
+        balance: value.get("balance").and_then(scalar_string),
+        has_credits: value.get("hasCredits")?.as_bool()?,
+        unlimited: value.get("unlimited")?.as_bool()?,
+    })
+}
+
+fn scalar_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| value.as_number().map(ToString::to_string))
 }
 
 fn read_claude_oauth_token(credentials_path: Option<&Path>) -> Result<String, ProbeFailure> {
@@ -1356,7 +1632,11 @@ fn success_snapshot(
         quota_state,
         plan,
         windows,
+        billable_usage: None,
+        credits: None,
+        rate_limit_reset_credits: None,
         observed_at_ms: now_epoch_ms(),
+        collection: None,
         message,
         error: None,
     }
@@ -1375,7 +1655,11 @@ fn failed_snapshot(profile: &ProviderProfile, failure: ProbeFailure) -> Provider
         quota_state: QuotaState::Unknown,
         plan: None,
         windows: Vec::new(),
+        billable_usage: None,
+        credits: None,
+        rate_limit_reset_credits: None,
         observed_at_ms: now_epoch_ms(),
+        collection: None,
         message: None,
         error: Some(failure.error),
     }
@@ -1432,24 +1716,47 @@ impl ProviderUsageCache {
         let profiles = options.selected_profiles();
         let probes = profiles.into_iter().map(|profile| async move {
             let now = now_epoch_ms();
+            let ttl_ms = i64::try_from(self.ttl.as_millis()).unwrap_or(i64::MAX);
             if !force_refresh {
                 let guard = self.inner.lock().await;
                 if let Some(cached) = guard.get(&profile) {
-                    let ttl_ms = i64::try_from(self.ttl.as_millis()).unwrap_or(i64::MAX);
                     if now.saturating_sub(cached.cached_at_ms) < ttl_ms {
-                        return cached.snapshot.clone();
+                        let mut snapshot = cached.snapshot.clone();
+                        let metadata =
+                            snapshot
+                                .collection
+                                .get_or_insert(ProviderUsageCollectionMetadata {
+                                    freshness: ProviderUsageFreshness::Cached,
+                                    probe_duration_ms: 0,
+                                    cached_at_ms: Some(cached.cached_at_ms),
+                                    expires_at_ms: Some(cached.cached_at_ms.saturating_add(ttl_ms)),
+                                });
+                        metadata.freshness = ProviderUsageFreshness::Cached;
+                        return snapshot;
                     }
                 }
             }
 
-            let snapshot = client.collect_profile_usage(profile.clone()).await;
+            let mut snapshot = client.collect_profile_usage(profile.clone()).await;
             let mut guard = self.inner.lock().await;
             if snapshot.probe_status == ProbeStatus::Ok {
+                let cached_at_ms = now_epoch_ms();
+                let metadata = snapshot
+                    .collection
+                    .get_or_insert(ProviderUsageCollectionMetadata {
+                        freshness: ProviderUsageFreshness::Live,
+                        probe_duration_ms: 0,
+                        cached_at_ms: None,
+                        expires_at_ms: None,
+                    });
+                metadata.freshness = ProviderUsageFreshness::Live;
+                metadata.cached_at_ms = Some(cached_at_ms);
+                metadata.expires_at_ms = Some(cached_at_ms.saturating_add(ttl_ms));
                 guard.insert(
                     profile,
                     CachedProviderUsage {
                         snapshot: snapshot.clone(),
-                        cached_at_ms: now_epoch_ms(),
+                        cached_at_ms,
                     },
                 );
             } else {
@@ -1581,6 +1888,87 @@ mod tests {
     }
 
     #[test]
+    fn exposes_versioned_provider_capabilities() {
+        let capabilities = provider_capabilities();
+        assert_eq!(capabilities.schema_version, CAPABILITIES_SCHEMA_VERSION);
+        assert_eq!(
+            capabilities.snapshot_schema_version,
+            SNAPSHOT_SCHEMA_VERSION
+        );
+        assert_eq!(capabilities.providers.len(), 2);
+
+        let codex = &capabilities.providers[0];
+        assert_eq!(codex.provider_id, ProviderId::Codex);
+        assert_eq!(codex.probe_transport, ProviderProbeTransport::LocalProcess);
+        assert!(!codex.submits_message);
+        assert!(!codex.may_affect_quota_or_billing);
+
+        let claude = &capabilities.providers[1];
+        assert_eq!(claude.provider_id, ProviderId::Claude);
+        assert_eq!(claude.probe_transport, ProviderProbeTransport::RemoteApi);
+        assert!(claude.submits_message);
+        assert!(claude.may_affect_quota_or_billing);
+    }
+
+    #[test]
+    fn evaluates_typed_readiness_counts() {
+        let profile = ProviderProfile::default_for_provider(ProviderId::Codex);
+        let ready = success_snapshot(
+            &profile,
+            None,
+            Some("fixture"),
+            None,
+            Vec::new(),
+            None,
+            QuotaState::Available,
+        );
+        let exhausted = success_snapshot(
+            &profile,
+            None,
+            Some("fixture"),
+            None,
+            Vec::new(),
+            None,
+            QuotaState::Exhausted,
+        );
+        let failed = failed_snapshot(
+            &profile,
+            ProbeFailure::new(ProviderUsageErrorCode::Network, "offline", true),
+        );
+
+        let any = ReadinessSummary::evaluate(
+            &[ready.clone(), exhausted.clone(), failed.clone()],
+            ReadinessPolicy::Any,
+        );
+        assert!(any.satisfied);
+        assert_eq!(any.total_profiles, 3);
+        assert_eq!(any.ready_profiles, 1);
+        assert_eq!(any.not_ready_profiles, 2);
+        assert_eq!(any.failed_probes, 1);
+        assert_eq!(any.exhausted_profiles, 1);
+
+        let all = ReadinessSummary::evaluate(&[ready, exhausted, failed], ReadinessPolicy::All);
+        assert!(!all.satisfied);
+        assert!(!ReadinessSummary::evaluate(&[], ReadinessPolicy::All).satisfied);
+    }
+
+    #[tokio::test]
+    async fn direct_collections_report_live_metadata() {
+        let invalid_profile = ProviderProfile {
+            id: String::new(),
+            ..ProviderProfile::default_for_provider(ProviderId::Codex)
+        };
+        let snapshot = AgentQuotaClient::new()
+            .collect_profile_usage(invalid_profile)
+            .await;
+        let metadata = snapshot
+            .collection
+            .expect("collection metadata should exist");
+        assert_eq!(metadata.freshness, ProviderUsageFreshness::Live);
+        assert_eq!(metadata.cached_at_ms, None);
+        assert_eq!(metadata.expires_at_ms, None);
+    }
+    #[test]
     fn parses_and_validates_profile_config() {
         let config = toml::from_str::<AgentQuotaConfig>(
             r#"
@@ -1652,8 +2040,12 @@ mod tests {
                 "rateLimits": {
                     "primary": { "usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1_730_947_200 },
                     "secondary": { "usedPercent": 46, "windowDurationMins": 10080, "resetsAt": 1_731_206_400 },
+                    "individualLimit": { "limit": "20.00", "used": "7.50", "remainingPercent": 63, "resetsAt": 1_731_206_400 },
+                    "credits": { "balance": "12.50", "hasCredits": true, "unlimited": false },
+                    "spendControlReached": false,
                     "rateLimitReachedType": "primary"
-                }
+                },
+                "rateLimitResetCredits": { "availableCount": 2 }
             }
         });
         let profile = ProviderProfile::default_for_provider(ProviderId::Codex);
@@ -1669,6 +2061,66 @@ mod tests {
         assert!(!snapshot.is_ready());
         assert_eq!(snapshot.account_label.as_deref(), Some("user@example.com"));
         assert_eq!(snapshot.windows.len(), 2);
+        assert_eq!(snapshot.windows[0].label, "5h window");
+        assert_eq!(snapshot.windows[1].label, "Weekly window");
+        let billable = snapshot
+            .billable_usage
+            .as_ref()
+            .expect("billable usage should map");
+        assert_eq!(billable.used, "7.50");
+        assert_eq!(billable.limit, "20.00");
+        assert_eq!(billable.remaining_percent, 63.0);
+        let credits = snapshot.credits.as_ref().expect("credits should map");
+        assert_eq!(credits.balance.as_deref(), Some("12.50"));
+        assert!(credits.has_credits);
+        assert!(!credits.unlimited);
+        assert_eq!(
+            snapshot
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(|credits| credits.available_count),
+            Some(2)
+        );
+        let value = serde_json::to_value(&snapshot).expect("snapshot should serialize");
+        assert_eq!(value["billableUsage"]["remainingPercent"], 63.0);
+        assert_eq!(value["credits"]["balance"], "12.50");
+        assert_eq!(value["rateLimitResetCredits"]["availableCount"], 2);
+    }
+
+    #[test]
+    fn billable_exhaustion_blocks_codex_readiness() {
+        let account = json!({
+            "id": 2,
+            "result": { "account": { "planType": "plus" } }
+        });
+        let rate_limits = json!({
+            "id": 3,
+            "result": {
+                "rateLimits": {
+                    "primary": { "usedPercent": 25, "windowDurationMins": 300 },
+                    "individualLimit": {
+                        "limit": "10.00",
+                        "used": "10.00",
+                        "remainingPercent": 0,
+                        "resetsAt": 1_731_206_400
+                    },
+                    "spendControlReached": true
+                }
+            }
+        });
+        let snapshot = codex_snapshot_from_responses(
+            &ProviderProfile::default_for_provider(ProviderId::Codex),
+            &account,
+            &rate_limits,
+        )
+        .expect("billable limit response should map");
+
+        assert_eq!(snapshot.quota_state, QuotaState::Exhausted);
+        assert!(!snapshot.is_ready());
+        assert_eq!(
+            snapshot.message.as_deref(),
+            Some("Billable usage limit reached")
+        );
     }
 
     #[test]
@@ -1810,6 +2262,20 @@ mod tests {
                 cached_at_ms: now_epoch_ms(),
             },
         );
+        let cached = cache
+            .collect(
+                &client,
+                CollectUsageOptions::profiles([codex_profile.clone()]),
+                false,
+            )
+            .await;
+        let metadata = cached[0]
+            .collection
+            .as_ref()
+            .expect("cache hit should expose metadata");
+        assert_eq!(metadata.freshness, ProviderUsageFreshness::Cached);
+        assert!(metadata.cached_at_ms.is_some());
+        assert!(metadata.expires_at_ms > metadata.cached_at_ms);
         let empty = CollectUsageOptions::profiles([]);
         assert!(cache
             .collect(&client, empty.clone(), false)
@@ -1867,6 +2333,35 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].schema_version, SNAPSHOT_SCHEMA_VERSION);
         assert_eq!(snapshots[0].probe_status, ProbeStatus::Ok);
+        let collection = snapshots[0]
+            .collection
+            .as_ref()
+            .expect("fixture should include optional collection metadata");
+        assert_eq!(collection.freshness, ProviderUsageFreshness::Live);
+        assert_eq!(collection.probe_duration_ms, 120);
+        assert_eq!(
+            snapshots[0]
+                .billable_usage
+                .as_ref()
+                .map(|usage| usage.remaining_percent),
+            Some(63.0)
+        );
+        assert_eq!(
+            snapshots[0]
+                .credits
+                .as_ref()
+                .and_then(|credits| credits.balance.as_deref()),
+            Some("12.50")
+        );
+        assert_eq!(
+            snapshots[0]
+                .rate_limit_reset_credits
+                .as_ref()
+                .map(|credits| credits.available_count),
+            Some(2)
+        );
+        assert!(snapshots[1].collection.is_none());
+        assert!(snapshots[1].billable_usage.is_none());
         assert_eq!(
             snapshots[1].error.as_ref().map(|error| error.code),
             Some(ProviderUsageErrorCode::CredentialsUnavailable)

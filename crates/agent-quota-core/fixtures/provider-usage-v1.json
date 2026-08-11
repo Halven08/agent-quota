@@ -21,7 +21,27 @@
         "detail": null
       }
     ],
+    "billableUsage": {
+      "used": "7.50",
+      "limit": "20.00",
+      "remainingPercent": 63.0,
+      "resetsAtEpochSeconds": 1731206400
+    },
+    "credits": {
+      "balance": "12.50",
+      "hasCredits": true,
+      "unlimited": false
+    },
+    "rateLimitResetCredits": {
+      "availableCount": 2
+    },
     "observedAtMs": 1730000000000,
+    "collection": {
+      "freshness": "live",
+      "probeDurationMs": 120,
+      "cachedAtMs": 1730000000100,
+      "expiresAtMs": 1730000300100
+    },
     "message": null,
     "error": null
   },

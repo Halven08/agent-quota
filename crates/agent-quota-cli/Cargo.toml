@@ -1,6 +1,6 @@
 ﻿[package]
 name = "agent-quota"
-version = "0.4.1"
+version = "0.5.0"
 description = "CLI for checking local AI coding agent quota status"
 edition.workspace = true
 rust-version.workspace = true
@@ -17,7 +17,7 @@ name = "agent-quota"
 path = "src/main.rs"
 
 [dependencies]
-agent-quota-core = { version = "0.4.1", path = "../agent-quota-core" }
+agent-quota-core = { version = "0.5.0", path = "../agent-quota-core" }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
